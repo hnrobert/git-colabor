@@ -1,8 +1,8 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  // askpass entry is added in M2 (identity/SSH).
-  entry: { cli: 'src/cli/index.ts', index: 'src/index.ts' },
+  // askpass is the SSH_ASKPASS helper invoked by ssh-add (bundled to dist/askpass.cjs).
+  entry: { cli: 'src/cli/index.ts', askpass: 'src/askpass/index.ts', index: 'src/index.ts' },
   format: ['cjs'],
   platform: 'node',
   target: 'node18',

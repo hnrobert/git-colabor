@@ -63,3 +63,35 @@ export async function git(args: string[], opts: GitOptions = {}): Promise<GitRes
   if (result.exitCode !== 0) throw new GitError(args.join(' '), result.exitCode, result.stderr);
   return result;
 }
+
+/**
+ * Run an arbitrary binary (e.g. `ssh-keygen`, `ssh-add`) with an arg array. Never throws —
+ * returns the full result so callers can branch on exit code.
+ */
+export async function runBin(
+  cmd: string,
+  args: string[],
+  opts: GitOptions & { input?: string } = {},
+): Promise<GitResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => {
+      stdout += d.toString('utf8');
+    });
+    child.stderr.on('data', (d) => {
+      stderr += d.toString('utf8');
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      resolve({ stdout, stderr, exitCode: code ?? 0 });
+    });
+    if (opts.input !== undefined) child.stdin.end(opts.input, 'utf8');
+    else child.stdin.end();
+  });
+}

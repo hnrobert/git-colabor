@@ -1,3 +1,4 @@
+import { resolve } from 'node:path';
 import { git, gitRaw } from './exec.js';
 
 export async function insideWorkTree(cwd?: string): Promise<boolean> {
@@ -9,6 +10,12 @@ export async function insideWorkTree(cwd?: string): Promise<boolean> {
 export async function topLevel(cwd?: string): Promise<string> {
   const r = await git(['rev-parse', '--show-toplevel'], { cwd });
   return r.stdout.trim();
+}
+
+/** Absolute path to the repository's `.git` directory (works for submodules / worktrees). */
+export async function gitDir(cwd?: string): Promise<string> {
+  const r = await git(['rev-parse', '--git-dir'], { cwd });
+  return resolve(cwd ?? process.cwd(), r.stdout.trim());
 }
 
 export async function isRepo(cwd?: string): Promise<boolean> {

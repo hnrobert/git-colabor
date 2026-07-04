@@ -7,25 +7,15 @@ export type GlobalFlags = {
   cwd?: string;
 };
 
-export type Parsed = {
-  subgroup?: string;
-  command?: string;
-  args: string[];
-  flags: GlobalFlags;
-  /** per-command dash flags not consumed as globals (e.g. -i / --initials). */
-  localFlags: string[];
-};
-
-export function parseArgv(argv: string[]): Parsed {
+/** Extract global flags from argv; everything else (positionals + per-command flags) is returned in order. */
+export function parseGlobals(argv: string[]): { flags: GlobalFlags; rest: string[] } {
   const flags: GlobalFlags = { json: false, noColor: false, help: false, version: false };
-  const positionals: string[] = [];
-  const localFlags: string[] = [];
-
+  const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     if (!tok) continue;
     if (tok === '--') {
-      positionals.push(...argv.slice(i + 1));
+      rest.push(...argv.slice(i + 1));
       break;
     }
     if (tok === '-C') {
@@ -60,19 +50,54 @@ export function parseArgv(argv: string[]): Parsed {
       flags.version = true;
       continue;
     }
+    rest.push(tok);
+  }
+  return { flags, rest };
+}
+
+export type CmdSpec = { valueFlags?: string[]; boolFlags?: string[] };
+export type CmdParsed = {
+  positionals: string[];
+  values: Record<string, string>;
+  bools: Set<string>;
+};
+
+/** Parse a command's tokens into positionals, value-flags (key→value), and boolean flags. */
+export function parseCommandArgs(tokens: string[], spec: CmdSpec = {}): CmdParsed {
+  const positionals: string[] = [];
+  const values: Record<string, string> = {};
+  const bools = new Set<string>();
+  const valueFlags = new Set(spec.valueFlags ?? []);
+  const boolFlags = new Set(spec.boolFlags ?? []);
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok) continue;
+    if (tok === '--') {
+      positionals.push(...tokens.slice(i + 1));
+      break;
+    }
+    if (tok.startsWith('--') && tok.includes('=')) {
+      const eq = tok.indexOf('=');
+      const k = tok.slice(0, eq);
+      const v = tok.slice(eq + 1);
+      if (valueFlags.has(k)) values[k] = v;
+      else bools.add(k);
+      continue;
+    }
+    if (valueFlags.has(tok)) {
+      const v = tokens[++i];
+      if (v !== undefined) values[tok] = v;
+      continue;
+    }
+    if (boolFlags.has(tok)) {
+      bools.add(tok);
+      continue;
+    }
     if (tok.startsWith('-')) {
-      const key = tok.includes('=') ? tok.slice(0, tok.indexOf('=')) : tok;
-      localFlags.push(key);
+      bools.add(tok);
       continue;
     }
     positionals.push(tok);
   }
-
-  return {
-    subgroup: positionals[0],
-    command: positionals[1],
-    args: positionals.slice(2),
-    flags,
-    localFlags,
-  };
+  return { positionals, values, bools };
 }

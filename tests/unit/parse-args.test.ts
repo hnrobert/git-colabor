@@ -1,42 +1,56 @@
 import { describe, it, expect } from 'vitest';
-import { parseArgv } from '../../src/cli/parse-args.js';
+import { parseCommandArgs, parseGlobals } from '../../src/cli/parse-args.js';
 
-describe('parseArgv', () => {
-  it('parses subgroup + command + args', () => {
-    const p = parseArgv(['coauthor', 'use', 'jd', 'ea']);
-    expect(p.subgroup).toBe('coauthor');
-    expect(p.command).toBe('use');
-    expect(p.args).toEqual(['jd', 'ea']);
-    expect(p.localFlags).toEqual([]);
-  });
-
-  it('global --json flag', () => {
-    expect(parseArgv(['--json', 'coauthor', 'ls']).flags.json).toBe(true);
+describe('parseGlobals', () => {
+  it('extracts globals and leaves the rest in order', () => {
+    const { flags, rest } = parseGlobals(['--json', 'coauthor', 'use', 'jd']);
+    expect(flags.json).toBe(true);
+    expect(rest).toEqual(['coauthor', 'use', 'jd']);
   });
 
   it('-C takes the next token', () => {
-    const p = parseArgv(['-C', '/tmp', 'coauthor', 'ls']);
-    expect(p.flags.cwd).toBe('/tmp');
-    expect(p.command).toBe('ls');
+    const { flags, rest } = parseGlobals(['-C', '/tmp', 'coauthor', 'ls']);
+    expect(flags.cwd).toBe('/tmp');
+    expect(rest).toEqual(['coauthor', 'ls']);
   });
 
   it('-C attached form', () => {
-    expect(parseArgv(['-C/tmp', 'coauthor', 'ls']).flags.cwd).toBe('/tmp');
-  });
-
-  it('collects per-command dash flags into localFlags', () => {
-    const p = parseArgv(['coauthor', 'print', '-i']);
-    expect(p.command).toBe('print');
-    expect(p.localFlags).toContain('-i');
-  });
-
-  it('-- terminator makes the rest positional', () => {
-    const p = parseArgv(['coauthor', 'add', '--', '-weird', 'Name', 'e@x.com']);
-    expect(p.args).toEqual(['-weird', 'Name', 'e@x.com']);
+    expect(parseGlobals(['-C/tmp', 'coauthor', 'ls']).flags.cwd).toBe('/tmp');
   });
 
   it('--log-level=value', () => {
-    const p = parseArgv(['--log-level=debug', 'coauthor', 'ls']);
-    expect(p.flags.logLevel).toBe('debug');
+    const { flags, rest } = parseGlobals(['--log-level=debug', 'coauthor', 'ls']);
+    expect(flags.logLevel).toBe('debug');
+    expect(rest).toEqual(['coauthor', 'ls']);
+  });
+
+  it('-- terminator keeps the rest as positional', () => {
+    const { rest } = parseGlobals(['coauthor', 'add', '--', '-n', 'Name', 'e@x.com']);
+    expect(rest).toEqual(['coauthor', 'add', '-n', 'Name', 'e@x.com']);
+  });
+});
+
+describe('parseCommandArgs', () => {
+  it('positionals only', () => {
+    expect(parseCommandArgs(['jd', 'ea']).positionals).toEqual(['jd', 'ea']);
+  });
+
+  it('value flags (space and = forms)', () => {
+    const p = parseCommandArgs(['--name', 'Alice', '--email=b@x.com'], {
+      valueFlags: ['--name', '--email'],
+    });
+    expect(p.values['--name']).toBe('Alice');
+    expect(p.values['--email']).toBe('b@x.com');
+    expect(p.positionals).toEqual([]);
+  });
+
+  it('bool flags', () => {
+    const p = parseCommandArgs(['-i'], { boolFlags: ['-i'] });
+    expect(p.bools.has('-i')).toBe(true);
+  });
+
+  it('unknown dash tokens are treated as bool', () => {
+    const p = parseCommandArgs(['--unknown']);
+    expect(p.bools.has('--unknown')).toBe(true);
   });
 });
