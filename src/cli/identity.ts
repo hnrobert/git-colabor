@@ -13,6 +13,7 @@ import { listAgent } from '../core/identity/agent.js';
 import { getConfig } from '../core/git/config.js';
 import { insideWorkTree } from '../core/git/rev.js';
 import { readState } from '../core/repo/state.js';
+import { repoStatus } from '../core/repo/status.js';
 import { auditLogPath, keysDir, mapPath } from '../core/paths.js';
 import type { Diagnostic, Identity, JsonResult, Source, Warning } from '../core/types.js';
 
@@ -67,6 +68,8 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return doctor(ctx);
     case 'revert':
       return revert(ctx);
+    case 'status':
+      return status(ctx);
     case '_apply':
       return hiddenApply(parseCommandArgs(tokens, APPLY_SPEC), ctx);
     default:
@@ -197,6 +200,23 @@ async function hiddenApply(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   return ok({
     applied: { userName: result.name, userEmail: result.email, sshCommand: result.sshCommand ?? null },
     conflict: result.conflict,
+  });
+}
+
+async function status(ctx: IdCtx): Promise<JsonResult> {
+  const { identities, defaultIdentity } = await listIdentities();
+  const rs = await repoStatus(ctx.cwd);
+  const active = rs.activeIdentityId ? identities.find((i) => i.id === rs.activeIdentityId) : undefined;
+  return ok({
+    repo: rs.repo,
+    inRepo: rs.inRepo,
+    managed: rs.managed,
+    managedBy: rs.managedBy,
+    heldBy: rs.heldBy,
+    activeIdentity: active ? identityToJson(active, defaultIdentity) : null,
+    identities: identities.map((i) => ({ ...identityToJson(i, defaultIdentity), active: i.id === rs.activeIdentityId })),
+    selected: rs.selected,
+    available: rs.available,
   });
 }
 

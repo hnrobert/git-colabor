@@ -40,6 +40,7 @@ function topHelp(): string {
     '  git colabor identity rm <id>',
     '  git colabor identity logout [id]',
     '  git colabor identity revert',
+    '  git colabor identity status',
     '  git colabor identity audit [--repo <p>] [--tail N]',
     '  git colabor identity doctor',
     '',

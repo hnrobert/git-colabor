@@ -17,6 +17,7 @@ export * from './core/paths.js';
 export * from './core/io.js';
 export * from './core/repo/state.js';
 export * from './core/repo/coordination.js';
+export * from './core/repo/status.js';
 export * from './core/identity/map.js';
 export * from './core/identity/keys.js';
 export * from './core/identity/agent.js';

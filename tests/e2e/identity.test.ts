@@ -12,6 +12,7 @@ import { readState, writeState } from '../../src/core/repo/state.js';
 import { getConfig } from '../../src/core/git/config.js';
 import { cliSessionId, detectConflict } from '../../src/core/repo/coordination.js';
 import { readAudit } from '../../src/core/logging/audit.js';
+import { repoStatus } from '../../src/core/repo/status.js';
 
 function git(cwd: string, args: string[]): string {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -72,6 +73,16 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(st.activeIdentity).toBe(b.id);
     expect(st.backups?.userName).toBe('Original Name');
     expect(st.backups?.userEmail).toBe('original@x.com');
+  });
+
+  it('repoStatus reports managed + active identity for the current repo', async () => {
+    const c = await addIdentity({ name: 'Carol', email: 'carol@x.com' });
+    await applyIdentity(c.id, { source: 'cli', cwd: root });
+    const rs = await repoStatus(root);
+    expect(rs.inRepo).toBe(true);
+    expect(rs.managed).toBe(true);
+    expect(rs.managedBy).toBe('cli');
+    expect(rs.activeIdentityId).toBe(c.id);
   });
 
   it('audit log records identity.use', async () => {
