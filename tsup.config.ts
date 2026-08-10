@@ -5,7 +5,7 @@ export default defineConfig({
   entry: { cli: 'src/cli/index.ts', askpass: 'src/askpass/index.ts', index: 'src/index.ts' },
   format: ['cjs'],
   platform: 'node',
-  target: 'node18',
+  target: 'node24',
   outDir: 'dist',
   splitting: false,
   sourcemap: false,

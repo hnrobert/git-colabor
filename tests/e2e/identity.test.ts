@@ -157,4 +157,15 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
 
     await rm(keyDir, { recursive: true, force: true });
   });
+
+  it('audit log never contains the passphrase command secret or key body', async () => {
+    const secret = 'TOPSECRET-TOKEN-1234';
+    const id = await addIdentity({ name: 'Sec', email: 'sec@x.com', passphraseCommand: `echo ${secret}` });
+    await applyIdentity(id.id, { source: 'cli', cwd: root });
+    const entries = await readAudit();
+    const blob = entries.map((e) => JSON.stringify(e)).join('\n');
+    expect(blob).not.toContain(secret);
+    expect(blob).not.toContain('PRIVATE KEY');
+    expect(blob).not.toContain('BEGIN OPENSSH');
+  });
 });

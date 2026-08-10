@@ -30,16 +30,32 @@ export async function isEncrypted(path: string): Promise<boolean> {
   return r.exitCode !== 0;
 }
 
+/**
+ * Restrict a key file to the current user. On POSIX → `chmod 0600`; on Windows → `icacls`
+ * (chmod is a no-op there). Best-effort; never throws (a key with loose perms just fails later
+ * with OpenSSH's "UNPROTECTED PRIVATE KEY FILE" error, which `doctor` reports).
+ */
+async function restrictKeyPerms(path: string): Promise<void> {
+  if (process.platform === 'win32') {
+    const user = process.env.USERNAME ?? process.env.USER ?? '';
+    if (user) {
+      await runBin('icacls', [path, '/inheritance:r', '/grant:r', `${user}:(R,W)`]).catch(() => {});
+    }
+    return;
+  }
+  await chmod(path, 0o600).catch(() => {});
+}
+
 /** Write key bytes to ~/.config/git-colabor/keys/<fingerprint> (mode 0600), return path + fingerprint. */
 export async function materializeKey(privateKeyPem: string): Promise<{ path: string; fingerprint: string }> {
   await mkdir(keysDir(), { recursive: true });
   const tmp = join(keysDir(), `.import.${randomBytes(4).toString('hex')}`);
   await writeFile(tmp, privateKeyPem.endsWith('\n') ? privateKeyPem : privateKeyPem + '\n', 'utf8');
-  await chmod(tmp, 0o600);
+  await restrictKeyPerms(tmp);
   const fingerprint = await fingerprintOfFile(tmp);
   const dest = keyFilePath(fingerprint);
   await rename(tmp, dest);
-  await chmod(dest, 0o600).catch(() => {});
+  await restrictKeyPerms(dest);
   return { path: dest, fingerprint };
 }
 
