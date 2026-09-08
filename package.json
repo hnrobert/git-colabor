@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Git co-author + multi-identity + SSH key management CLI (git colabor)",
   "type": "module",
+  "license": "MIT",
   "bin": {
     "git-colabor": "bin/git-colabor.cjs"
   },
@@ -37,5 +38,6 @@
     "typescript": "^5.4.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^2.0.0"
-  }
+  },
+  "packageManager": "pnpm@10.13.1"
 }
