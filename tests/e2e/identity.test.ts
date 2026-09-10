@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm, stat, access } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -126,19 +126,39 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     await writeState(st, root);
   });
 
-  it('importKey materializes a real key with 0600 + matching fingerprint', async () => {
+  it('importKey references the source file (no copy) with a matching fingerprint', async () => {
     const keyDir = await mkdtemp(join(tmpdir(), 'ca-key-'));
     const keyPath = join(keyDir, 'id_test');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'test'], { encoding: 'utf8' });
     const imp = await importKey(keyPath);
     expect(imp.encrypted).toBe(false);
-    const st = await stat(imp.path);
-    expect(st.mode & 0o777).toBe(0o600);
-    expect(await fingerprintOfFile(imp.path)).toBe(imp.fingerprint);
+    expect(imp.path).toBe(keyPath); // reference mode: the identity points at the source
+    expect(await fingerprintOfFile(keyPath)).toBe(imp.fingerprint);
+    await stat(keyPath); // source untouched
     await rm(keyDir, { recursive: true, force: true });
   });
 
-  it('logout shreds the active identity keyfile', async () => {
+  it('apply falls back to key-less when the referenced key file is gone', async () => {
+    const keyDir = await mkdtemp(join(tmpdir(), 'ca-key3-'));
+    const keyPath = join(keyDir, 'id_gone');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'gone'], { encoding: 'utf8' });
+    const imp = await importKey(keyPath);
+    const id = await addIdentity({
+      name: 'GoneKey',
+      email: 'gone@x.com',
+      sshKeyFingerprint: imp.fingerprint,
+      sshKeyPath: imp.path,
+    });
+    await rm(keyDir, { recursive: true, force: true }); // break the reference
+
+    const { result } = await applyIdentity(id.id, { source: 'cli', cwd: root });
+    expect(result.keyMissing).toBe(true);
+    expect(result.sshCommand).toBeUndefined();
+    expect(await getConfig('user.name', 'local', root)).toBe('GoneKey');
+    expect(await getConfig('core.sshCommand', 'local', root)).toBeUndefined();
+  });
+
+  it('logout removes the key from the agent but never deletes the file', async () => {
     const keyDir = await mkdtemp(join(tmpdir(), 'ca-key2-'));
     const keyPath = join(keyDir, 'id_test');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'test'], { encoding: 'utf8' });
@@ -154,8 +174,8 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     await writeState(st, root);
 
     const r = await logoutIdentity({ source: 'cli', cwd: root, id: id.id });
-    expect(r.keyfileShredded).toBe(true);
-    await expect(access(imp.path)).rejects.toThrow();
+    expect(r.agentRemoved).toBe(false); // no agent under test — removal is best-effort
+    await stat(keyPath); // reference mode: the user's file survives logout
 
     await rm(keyDir, { recursive: true, force: true });
   });

@@ -196,10 +196,8 @@ function identityHuman(command: string | undefined, d: unknown): string {
       .join('\n')}`;
   }
   if (command === 'logout') {
-    const data = d as { identity: { name: string }; cleared: { agent: boolean; keyfile: boolean } };
-    return `Logged out "${data.identity.name}" (agent:${data.cleared.agent ? 'removed' : 'n/a'}, keyfile:${
-      data.cleared.keyfile ? 'shredded' : 'n/a'
-    })`;
+    const data = d as { identity: { name: string }; cleared: { agent: boolean } };
+    return `Logged out "${data.identity.name}" (agent: ${data.cleared.agent ? 'removed' : 'n/a'}; the key file itself is never touched)`;
   }
   if (command === 'revert') {
     const data = d as { hadBackup: boolean };

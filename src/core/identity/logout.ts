@@ -1,5 +1,3 @@
-import { unlink } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
 import { topLevel } from '../git/rev.js';
 import { readState, writeState } from '../repo/state.js';
 import { getIdentity, listIdentities } from './map.js';
@@ -16,24 +14,14 @@ async function safeTopLevel(cwd?: string): Promise<string | undefined> {
   }
 }
 
-async function shred(path: string): Promise<boolean> {
-  if (process.platform !== 'win32') {
-    const r = spawnSync('shred', ['-u', path]);
-    if (r.status === 0) return true;
-  }
-  try {
-    await unlink(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Logout an identity's key: remove from ssh-agent, shred the keyfile, clear activeIdentity/heldBy
- * if it was active. Does NOT remove the identity from the map (use `rm`) nor touch user.* (use `revert`).
- * Note: the passphrase in VS Code SecretStorage can only be purged by the extension; shredding the
- * keyfile makes it useless, so this is the meaningful CLI-side cleanup.
+ * Logout an identity's key: remove it from ssh-agent and clear
+ * activeIdentity/heldBy if it was active. Does NOT remove the identity from
+ * the map (use `rm`) nor touch user.* (use `revert`).
+ *
+ * Keys are REFERENCED, never copied — the file on disk belongs to the user
+ * and is never modified or deleted by us; deleting the key itself is the
+ * user's call.
  */
 export async function logoutIdentity(opts: {
   source: Source;
@@ -42,7 +30,6 @@ export async function logoutIdentity(opts: {
 }): Promise<{
   identity: { id: string; name: string; fingerprint?: string };
   agentRemoved: boolean;
-  keyfileShredded: boolean;
 }> {
   const state = await readState(opts.cwd);
   let id = opts.id ?? state.activeIdentity;
@@ -53,12 +40,7 @@ export async function logoutIdentity(opts: {
   }
   const identity = await getIdentity(id);
 
-  let agentRemoved = false;
-  let keyfileShredded = false;
-  if (identity.sshKeyPath) {
-    agentRemoved = await removeKey(identity.sshKeyPath);
-    keyfileShredded = await shred(identity.sshKeyPath);
-  }
+  const agentRemoved = identity.sshKeyPath ? await removeKey(identity.sshKeyPath) : false;
 
   if (state.activeIdentity === identity.id) {
     state.activeIdentity = undefined;
@@ -78,6 +60,5 @@ export async function logoutIdentity(opts: {
   return {
     identity: { id: identity.id, name: identity.name, fingerprint: identity.sshKeyFingerprint },
     agentRemoved,
-    keyfileShredded,
   };
 }

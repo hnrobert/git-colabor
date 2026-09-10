@@ -14,7 +14,7 @@ You share a machine — a lab workstation, a pair-programming box, a Remote-SSH 
 
 - **Identities** — named `{ name, email, SSH key }` profiles; `identity use` writes `user.name`, `user.email`, and `core.sshCommand` for the current repo, loads the key into `ssh-agent`, and snapshots prior config so `revert` can restore it.
 - **Co-authors** — select people from a `.git-coauthors` catalogue (git-mob-compatible JSON); trailers are seeded into the commit template and stay in sync.
-- **Safe key handling** — private keys are imported to a `0600` directory, passphrases never appear on `argv` / `ps` (SSH_ASKPASS bridge, optional `--passphrase-command`), `logout` shreds the key file.
+- **Safe key handling** — private keys are referenced in place (never copied or modified), passphrases never appear on `argv` / `ps` (SSH_ASKPASS bridge, optional `--passphrase-command`), a broken key reference degrades to a key-less apply.
 - **Coordination** — advisory `heldBy` session locking warns when a second session (another terminal, another VS Code window) is about to override the repo identity; nothing is ever silently clobbered.
 - **Audit trail** — every identity action is appended to a local JSONL audit log (fingerprint only — never key bodies or passphrases).
 - **Machine-friendly** — every command supports `--json` with a stable envelope and documented exit codes.
@@ -77,7 +77,7 @@ Selecting co-authors rewrites the commit template (`commit.template` / `~/.gitme
 | `identity use <id>` | Apply identity to the current repo (config + agent + state). Flags: `--source cli\|ext`, `--as-name`, `--as-email` (override committer fields), `--no-override` (refuse to take over a repo held by another session → exit 6). |
 | `identity add` | `--name`, `--email` (required); `--key <path>` (import), `--passphrase-command <cmd>`, `--host`, `--default`. |
 | `identity rm <id>` | Remove from the identity map (logs out first, best-effort). |
-| `identity logout [id]` | Remove key from `ssh-agent` and **shred** the key file; repo stays configured (use `revert` for that). |
+| `identity logout [id]` | Remove key from `ssh-agent` — the key file itself is never touched; repo stays configured (use `revert` for that). |
 | `identity revert` | Restore the repo's pre-tool `user.*` / `core.sshCommand` / `commit.template` from the first-touch backup, clear markers. |
 | `identity status` | Per-repo snapshot: active identity, managed markers, `heldBy`, selected + available co-authors. |
 | `identity audit` | `--repo <path>`, `--since <date>`, `--tail <n>` filters over the audit log. |
@@ -118,8 +118,7 @@ This is the contract the VS Code extension consumes.
 
 | Path | Purpose | Mode |
 | --- | --- | --- |
-| `~/.config/git-colabor/identities.json` | Identity map (env `GIT_COLABOR_MAP`) | `0600` |
-| `~/.config/git-colabor/keys/<fingerprint>.key` | Imported private keys | `0600` (`icacls` on Windows) |
+| `~/.config/git-colabor/identities.json` | Identity map (referenced key paths + fingerprints; env `GIT_COLABOR_MAP`) | `0600` |
 | `~/.config/git-colabor/audit.log` | JSONL audit trail | `0600` |
 | `<git-dir>/colabor/state.json` | Per-repo state: active identity, `heldBy`, config backups | `0600` |
 | `.git-coauthors` (repo, else `~/.git-coauthors`) | Co-author catalogue, git-mob-compatible JSON | — |
@@ -137,7 +136,7 @@ Git config keys **written locally** per repo: `user.name`, `user.email`, `core.s
 
 ## Security notes
 
-- Private keys are **copied** into a `0600` keys dir (`icacls /inheritance:r` on Windows); the source file is left untouched. Encrypt-on-import is planned post-0.1.0; importing an unencrypted key raises a warning.
+- Private keys are **referenced in place** — the tool never copies, modifies, or deletes them; your file layout and permissions are entirely yours. Importing an unencrypted key raises a warning; a key file that later disappears degrades the identity to key-less with a `key-missing` warning.
 - Passphrases are resolved via, in order: the extension's askpass socket bridge → `passphrase-command` → interactive tty prompt. They never appear on `argv`, in `ps`, or in any log (redaction is unit- and e2e-tested).
 - The audit log records fingerprints and session metadata only.
 

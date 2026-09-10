@@ -5,6 +5,7 @@ import { detectConflict, nowHeldBy, cliSessionId, type ConflictInfo } from '../r
 import { appendAudit } from '../logging/audit.js';
 import { loadKey } from './agent.js';
 import { getIdentity } from './map.js';
+import { keyUsable } from './keys.js';
 import { AppError } from '../errors.js';
 import type { Identity, Source } from '../types.js';
 
@@ -26,6 +27,8 @@ export type ApplyResult = {
   sshCommand?: string;
   conflict: ConflictInfo | null;
   keyLoaded?: { loaded: boolean; via: string; message?: string };
+  /** the referenced key file was missing/unreadable — applied without a key */
+  keyMissing?: boolean;
 };
 
 async function safeTopLevel(cwd?: string): Promise<string | undefined> {
@@ -108,15 +111,25 @@ export async function applyIdentity(
   opts: ApplyOpts & { asName?: string; asEmail?: string },
 ): Promise<{ identity: Identity; result: ApplyResult }> {
   const identity = await getIdentity(id);
-  const sshCommand = identity.sshKeyPath
-    ? `ssh -i ${identity.sshKeyPath} -o IdentitiesOnly=yes`
-    : undefined;
+  let sshCommand: string | undefined;
+  let keyMissing = false;
+  if (identity.sshKeyPath) {
+    // Reference mode: the key lives wherever the user put it. A broken
+    // reference (moved/renamed/deleted) degrades to a key-less apply —
+    // name/email still switch, no core.sshCommand is written, agent load skipped.
+    if (await keyUsable(identity.sshKeyPath)) {
+      sshCommand = `ssh -i ${identity.sshKeyPath} -o IdentitiesOnly=yes`;
+    } else {
+      keyMissing = true;
+    }
+  }
   const result = await applyResolvedIdentity({
     name: opts.asName ?? identity.name,
     email: opts.asEmail ?? identity.email,
     sshCommand,
-    identity,
+    identity: keyMissing ? { ...identity, sshKeyPath: undefined } : identity,
     opts,
   });
+  result.keyMissing = keyMissing;
   return { identity, result };
 }

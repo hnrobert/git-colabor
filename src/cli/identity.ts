@@ -15,7 +15,7 @@ import { getConfig } from '../core/git/config.js';
 import { insideWorkTree } from '../core/git/rev.js';
 import { readState } from '../core/repo/state.js';
 import { repoStatus } from '../core/repo/status.js';
-import { auditLogPath, keysDir, mapPath } from '../core/paths.js';
+import { auditLogPath, mapPath } from '../core/paths.js';
 import type { Diagnostic, Identity, JsonResult, Source, Warning } from '../core/types.js';
 
 export type IdCtx = {
@@ -41,7 +41,8 @@ function identityToJson(i: Identity, defaultId?: string) {
     email: i.email,
     sshKeyFingerprint: i.sshKeyFingerprint,
     host: i.host,
-    hasKey: !!i.sshKeyPath,
+    // reference mode: a key counts only while the referenced file is still there
+    hasKey: !!i.sshKeyPath && existsSync(i.sshKeyPath),
     isDefault: i.id === defaultId,
   };
 }
@@ -100,6 +101,12 @@ async function use(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   });
   const warnings: Warning[] = [];
   if (result.conflict) warnings.push({ code: 'conflict', message: `overrode ${result.conflict.heldBy.session}` });
+  if (result.keyMissing) {
+    warnings.push({
+      code: 'key-missing',
+      message: `key file missing or unreadable: ${identity.sshKeyPath} — applied without a key (no core.sshCommand)`,
+    });
+  }
   if (result.keyLoaded && !result.keyLoaded.loaded) {
     warnings.push({ code: 'key-not-loaded', message: `key not loaded into agent: ${result.keyLoaded.message ?? result.keyLoaded.via}` });
   }
@@ -201,7 +208,7 @@ async function logout(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const r = await logoutIdentity({ source: 'cli', cwd: ctx.cwd, id: p.positionals[0] });
   return ok({
     identity: r.identity,
-    cleared: { agent: r.agentRemoved, keyfile: r.keyfileShredded },
+    cleared: { agent: r.agentRemoved },
   });
 }
 
@@ -276,12 +283,6 @@ async function doctor(ctx: IdCtx): Promise<JsonResult> {
     check('identity map', () => true, mapPath());
   } catch {
     check('identity map', () => true, `${mapPath()} (will be created on first add)`);
-  }
-  try {
-    accessSync(keysDir(), constants.W_OK);
-    check('keys dir', () => true, keysDir());
-  } catch {
-    check('keys dir', () => true, `${keysDir()} (will be created on first import)`);
   }
 
   check('audit log', () => true, auditLogPath());

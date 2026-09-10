@@ -1,9 +1,6 @@
-import { readFile, writeFile, mkdir, chmod, rename } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { resolve } from 'node:path';
 import { runBin } from '../git/exec.js';
 import { AppError } from '../errors.js';
-import { keyFilePath, keysDir } from '../paths.js';
 
 const FP_RE = /SHA256:[A-Za-z0-9+/=]+/;
 
@@ -30,39 +27,24 @@ export async function isEncrypted(path: string): Promise<boolean> {
   return r.exitCode !== 0;
 }
 
-/**
- * Restrict a key file to the current user. On POSIX → `chmod 0600`; on Windows → `icacls`
- * (chmod is a no-op there). Best-effort; never throws (a key with loose perms just fails later
- * with OpenSSH's "UNPROTECTED PRIVATE KEY FILE" error, which `doctor` reports).
- */
-async function restrictKeyPerms(path: string): Promise<void> {
-  if (process.platform === 'win32') {
-    const user = process.env.USERNAME ?? process.env.USER ?? '';
-    if (user) {
-      await runBin('icacls', [path, '/inheritance:r', '/grant:r', `${user}:(R,W)`]).catch(() => {});
-    }
-    return;
+/** Whether a referenced key is still usable (present + parseable fingerprint). */
+export async function keyUsable(path: string): Promise<boolean> {
+  try {
+    await fingerprintOfFile(path);
+    return true;
+  } catch {
+    return false;
   }
-  await chmod(path, 0o600).catch(() => {});
 }
 
-/** Write key bytes to ~/.config/git-colabor/keys/<fingerprint> (mode 0600), return path + fingerprint. */
-export async function materializeKey(privateKeyPem: string): Promise<{ path: string; fingerprint: string }> {
-  await mkdir(keysDir(), { recursive: true });
-  const tmp = join(keysDir(), `.import.${randomBytes(4).toString('hex')}`);
-  await writeFile(tmp, privateKeyPem.endsWith('\n') ? privateKeyPem : privateKeyPem + '\n', 'utf8');
-  await restrictKeyPerms(tmp);
-  const fingerprint = await fingerprintOfFile(tmp);
-  const dest = keyFilePath(fingerprint);
-  await rename(tmp, dest);
-  await restrictKeyPerms(dest);
-  return { path: dest, fingerprint };
-}
-
-/** Import a key from a source path: materialize + report fingerprint + encrypted flag. */
+/**
+ * Reference a key at its SOURCE path — no copy is made, the file is never
+ * modified, and the identity stores the absolute path. Broken references
+ * (moved/deleted/rotated source) are detected at `use` time and degrade to
+ * a key-less apply (see apply.ts).
+ */
 export async function importKey(sourcePath: string): Promise<{ path: string; fingerprint: string; encrypted: boolean }> {
-  const pem = await readFile(sourcePath, 'utf8');
-  const { path, fingerprint } = await materializeKey(pem);
-  const encrypted = await isEncrypted(path);
-  return { path, fingerprint, encrypted };
+  const fingerprint = await fingerprintOfFile(sourcePath); // throws KEY_READ_FAILED when unreadable
+  const encrypted = await isEncrypted(sourcePath);
+  return { path: resolve(sourcePath), fingerprint, encrypted };
 }
