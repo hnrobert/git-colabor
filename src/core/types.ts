@@ -58,6 +58,7 @@ export type AuditAction =
   | 'identity.use'
   | 'identity.logout'
   | 'identity.revert'
+  | 'identity.import'
   | 'coauthor.use'
   | 'coauthor.solo'
   | 'key.load'

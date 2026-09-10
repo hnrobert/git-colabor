@@ -3,7 +3,8 @@ import { existsSync, accessSync, constants } from 'node:fs';
 import { parseCommandArgs, type CmdParsed, type GlobalFlags } from './parse-args.js';
 import { Errors } from '../core/errors.js';
 import { ok } from './json.js';
-import { addIdentity, listIdentities, removeIdentity, setDefault } from '../core/identity/map.js';
+import { addIdentity, listIdentities, readMap, removeIdentity, setDefault } from '../core/identity/map.js';
+import { historyCommitters } from '../core/git/committers.js';
 import { importKey } from '../core/identity/keys.js';
 import { applyIdentity, applyResolvedIdentity } from '../core/identity/apply.js';
 import { revertRepo } from '../core/identity/revert.js';
@@ -58,6 +59,8 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return use(parseCommandArgs(tokens, USE_SPEC), ctx);
     case 'add':
       return add(parseCommandArgs(tokens, ADD_SPEC));
+    case 'import':
+      return importFromHistory(ctx);
     case 'rm':
       return rm(parseCommandArgs(tokens), ctx);
     case 'logout':
@@ -151,6 +154,35 @@ async function add(p: CmdParsed): Promise<JsonResult> {
   if (p.bools.has('--default')) await setDefault(identity.id);
   await appendAudit({ action: 'key.load', source: 'cli', identity: identity.id, identityName: name, fingerprint: sshKeyFingerprint });
   return ok({ identity: identityToJson(identity), encrypted }, warnings);
+}
+
+/**
+ * Add every distinct committer from the repo history as a (key-less)
+ * identity. Idempotent: committers already in the map (by email) are
+ * skipped. Mostly driven by the extension on repo open.
+ */
+export async function importFromHistory(ctx: IdCtx): Promise<JsonResult> {
+  if (!(await insideWorkTree(ctx.cwd))) throw Errors.notARepo(ctx.cwd);
+  const committers = await historyCommitters(ctx.cwd);
+  const map = await readMap();
+  const known = new Set(Object.values(map.identities).map((i) => i.email.toLowerCase()));
+  const added: Identity[] = [];
+  for (const c of committers) {
+    if (known.has(c.email.toLowerCase())) continue;
+    const identity = await addIdentity({ name: c.name, email: c.email });
+    known.add(c.email.toLowerCase());
+    added.push(identity);
+  }
+  if (added.length > 0) {
+    await appendAudit({
+      action: 'identity.import',
+      source: process.env.GIT_COLABOR_SOURCE === 'ext' ? 'ext' : 'cli',
+      message: `imported ${added.length} committer(s) from history`,
+    });
+  }
+  const warnings: Warning[] =
+    committers.length === 0 ? [{ code: 'empty', message: 'no commits found in history' }] : [];
+  return ok({ added: added.map((i) => identityToJson(i)), skipped: committers.length - added.length }, warnings);
 }
 
 async function rm(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {

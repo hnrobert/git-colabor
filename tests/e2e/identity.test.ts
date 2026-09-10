@@ -13,6 +13,8 @@ import { getConfig } from '../../src/core/git/config.js';
 import { cliSessionId, detectConflict } from '../../src/core/repo/coordination.js';
 import { readAudit } from '../../src/core/logging/audit.js';
 import { repoStatus } from '../../src/core/repo/status.js';
+import { historyCommitters } from '../../src/core/git/committers.js';
+import { importFromHistory } from '../../src/cli/identity.js';
 
 function git(cwd: string, args: string[]): string {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -167,5 +169,28 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(blob).not.toContain(secret);
     expect(blob).not.toContain('PRIVATE KEY');
     expect(blob).not.toContain('BEGIN OPENSSH');
+  });
+
+  it('historyCommitters lists distinct committers, most frequent first', async () => {
+    git(root, ['-c', 'user.name=Committer One', '-c', 'user.email=c1@x.com', 'commit', '-q', '--allow-empty', '-m', 'i1']);
+    git(root, ['-c', 'user.name=Committer One', '-c', 'user.email=c1@x.com', 'commit', '-q', '--allow-empty', '-m', 'i2']);
+    git(root, ['-c', 'user.name=Committer Two', '-c', 'user.email=c2@x.com', 'commit', '-q', '--allow-empty', '-m', 'i3']);
+    const cs = await historyCommitters(root);
+    expect(cs.map((c) => c.email)).toEqual(['c1@x.com', 'c2@x.com']);
+    expect(cs[0]).toMatchObject({ name: 'Committer One' });
+  });
+
+  it('identity import adds every history committer once, then is a no-op', async () => {
+    const first = await importFromHistory({ cwd: root } as Parameters<typeof importFromHistory>[0]);
+    const d1 = (first as { ok: true; data: { added: { email: string }[]; skipped: number } }).data;
+    expect(d1.added.map((a) => a.email).sort()).toEqual(['c1@x.com', 'c2@x.com']);
+    const { identities } = await listIdentities();
+    for (const e of ['c1@x.com', 'c2@x.com']) {
+      expect(identities.some((i) => i.email === e)).toBe(true);
+    }
+    const second = await importFromHistory({ cwd: root } as Parameters<typeof importFromHistory>[0]);
+    const d2 = (second as { ok: true; data: { added: unknown[]; skipped: number } }).data;
+    expect(d2.added).toEqual([]);
+    expect(d2.skipped).toBe(d1.added.length);
   });
 });
