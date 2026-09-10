@@ -38,6 +38,7 @@ function topHelp(): string {
     '  git colabor identity use <id> [--as-name <n> --as-email <e>]',
     '  git colabor identity add --name <n> --email <e> [--key <path>] [--passphrase-command <cmd>]',
     '  git colabor identity import   (add all history committers as identities)',
+    '  git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key',
     '  git colabor identity rm <id>',
     '  git colabor identity logout [id]',
     '  git colabor identity revert',
@@ -188,6 +189,12 @@ function identityHuman(command: string | undefined, d: unknown): string {
     }`;
   }
   if (command === 'rm') return `Removed identity ${(d as { removed: string }).removed}`;
+  if (command === 'set') {
+    const data = d as { identity: IdentityJson };
+    return `Updated identity "${data.identity.name}" <${data.identity.email}> (${data.identity.id})${
+      data.identity.hasKey ? ` key=${data.identity.sshKeyFingerprint ?? ''}` : ''
+    }`;
+  }
   if (command === 'import') {
     const data = d as { added: IdentityJson[]; skipped: number };
     if (data.added.length === 0) return `No new committers (skipped ${data.skipped} already-known).`;

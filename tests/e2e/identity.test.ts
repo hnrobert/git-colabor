@@ -3,7 +3,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { addIdentity, listIdentities } from '../../src/core/identity/map.js';
+import { addIdentity, hideIdentityEmail, listIdentities, removeIdentity, updateIdentity } from '../../src/core/identity/map.js';
 import { applyIdentity } from '../../src/core/identity/apply.js';
 import { revertRepo } from '../../src/core/identity/revert.js';
 import { logoutIdentity } from '../../src/core/identity/logout.js';
@@ -212,5 +212,44 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const d2 = (second as { ok: true; data: { added: unknown[]; skipped: number } }).data;
     expect(d2.added).toEqual([]);
     expect(d2.skipped).toBe(d1.added.length);
+  });
+
+  it('identity set renames and re-references the key', async () => {
+    const { identities } = await listIdentities();
+    const target = identities.find((i) => i.email === 'c1@x.com')!;
+    const renamed = await updateIdentity(target.id, { name: 'Committer Renamed' });
+    expect(renamed.name).toBe('Committer Renamed');
+    expect(renamed.email).toBe('c1@x.com');
+
+    const keyDir = await mkdtemp(join(tmpdir(), 'ca-key-set-'));
+    const keyPath = join(keyDir, 'id_set');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'set'], { encoding: 'utf8' });
+    const imp = await importKey(keyPath);
+    const withKey = await updateIdentity(target.id, { sshKeyPath: imp.path, sshKeyFingerprint: imp.fingerprint });
+    expect(withKey.sshKeyPath).toBe(keyPath);
+
+    const cleared = await updateIdentity(target.id, { sshKeyPath: undefined });
+    expect(cleared.sshKeyPath).toBeUndefined();
+    expect(cleared.sshKeyFingerprint).toBeUndefined();
+    await rm(keyDir, { recursive: true, force: true });
+  });
+
+  it('rm of an imported identity hides it from future imports; a manual add un-hides', async () => {
+    const { identities } = await listIdentities();
+    const target = identities.find((i) => i.email === 'c2@x.com')!;
+    expect(target.imported).toBe(true);
+    await removeIdentity(target.id);
+    await hideIdentityEmail(target.email);
+
+    const again = await importFromHistory({ cwd: root } as Parameters<typeof importFromHistory>[0]);
+    const d = (again as { ok: true; data: { added: { email: string }[] } }).data;
+    expect(d.added.map((a) => a.email)).not.toContain('c2@x.com'); // hidden — no resurrection
+
+    const manual = await addIdentity({ name: 'Committer Two', email: 'C2@x.com' }); // manual add clears hidden
+    const third = await importFromHistory({ cwd: root } as Parameters<typeof importFromHistory>[0]);
+    const d3 = (third as { ok: true; data: { added: { email: string }[] } }).data;
+    expect(d3.added.map((a) => a.email)).not.toContain('C2@x.com'); // already present via manual add
+    const mapNow = await listIdentities();
+    expect(mapNow.identities.some((i) => i.id === manual.id)).toBe(true);
   });
 });

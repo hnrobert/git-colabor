@@ -3,7 +3,16 @@ import { existsSync, accessSync, constants } from 'node:fs';
 import { parseCommandArgs, type CmdParsed, type GlobalFlags } from './parse-args.js';
 import { Errors } from '../core/errors.js';
 import { ok } from './json.js';
-import { addIdentity, listIdentities, readMap, removeIdentity, setDefault } from '../core/identity/map.js';
+import {
+  addIdentity,
+  getIdentity,
+  hideIdentityEmail,
+  listIdentities,
+  readMap,
+  removeIdentity,
+  setDefault,
+  updateIdentity,
+} from '../core/identity/map.js';
 import { historyCommitters } from '../core/git/committers.js';
 import { importKey } from '../core/identity/keys.js';
 import { applyIdentity, applyResolvedIdentity } from '../core/identity/apply.js';
@@ -33,6 +42,7 @@ const ADD_SPEC = {
 };
 const AUDIT_SPEC = { valueFlags: ['--repo', '--since', '--tail'] };
 const APPLY_SPEC = { valueFlags: ['--name', '--email', '--ssh-command', '--source'] };
+const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--passphrase-command'], boolFlags: ['--no-key'] };
 
 function identityToJson(i: Identity, defaultId?: string) {
   return {
@@ -43,6 +53,7 @@ function identityToJson(i: Identity, defaultId?: string) {
     host: i.host,
     // reference mode: a key counts only while the referenced file is still there
     hasKey: !!i.sshKeyPath && existsSync(i.sshKeyPath),
+    imported: !!i.imported,
     isDefault: i.id === defaultId,
   };
 }
@@ -62,6 +73,8 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return add(parseCommandArgs(tokens, ADD_SPEC));
     case 'import':
       return importFromHistory(ctx);
+    case 'set':
+      return setIdentity(parseCommandArgs(tokens, SET_SPEC));
     case 'rm':
       return rm(parseCommandArgs(tokens), ctx);
     case 'logout':
@@ -166,18 +179,21 @@ async function add(p: CmdParsed): Promise<JsonResult> {
 /**
  * Add every distinct committer from the repo history as a (key-less)
  * identity. Idempotent: committers already in the map (by email) are
- * skipped. Mostly driven by the extension on repo open.
+ * skipped, as are emails hidden via hide(machine). Mostly driven by the
+ * extension on repo open.
  */
 export async function importFromHistory(ctx: IdCtx): Promise<JsonResult> {
   if (!(await insideWorkTree(ctx.cwd))) throw Errors.notARepo(ctx.cwd);
   const committers = await historyCommitters(ctx.cwd);
   const map = await readMap();
   const known = new Set(Object.values(map.identities).map((i) => i.email.toLowerCase()));
+  const hidden = new Set(Object.keys(map.hidden ?? {}));
   const added: Identity[] = [];
   for (const c of committers) {
-    if (known.has(c.email.toLowerCase())) continue;
-    const identity = await addIdentity({ name: c.name, email: c.email });
-    known.add(c.email.toLowerCase());
+    const id = c.email.toLowerCase();
+    if (known.has(id) || hidden.has(id)) continue;
+    const identity = await addIdentity({ name: c.name, email: c.email, imported: true });
+    known.add(id);
     added.push(identity);
   }
   if (added.length > 0) {
@@ -195,13 +211,66 @@ export async function importFromHistory(ctx: IdCtx): Promise<JsonResult> {
 async function rm(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const id = p.positionals[0];
   if (!id) throw Errors.usage('git colabor identity rm <id>');
+  let email: string | undefined;
+  let wasImported = false;
+  try {
+    const identity = await getIdentity(id);
+    email = identity.email;
+    wasImported = !!identity.imported;
+  } catch {
+    // fall through — removeIdentity reports the not-found error
+  }
   try {
     await logoutIdentity({ source: 'cli', cwd: ctx.cwd, id });
   } catch {
     // identity may have no key / not active — that's fine for removal
   }
   await removeIdentity(id);
-  return ok({ removed: id });
+  if (wasImported && email) await hideIdentityEmail(email); // keep auto-import from resurrecting it
+  return ok({ removed: id, hidden: wasImported ? (email ?? '').toLowerCase() : undefined });
+}
+
+/**
+ * Edit an identity in place: --name / --email / --key <path> (re-reference)
+ * / --no-key (clear the key reference). Changes land in the machine-level
+ * identity store (~/.config/git-colabor/identities.json).
+ */
+async function setIdentity(p: CmdParsed): Promise<JsonResult> {
+  const id = p.positionals[0];
+  if (!id) throw Errors.usage('git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key');
+  await getIdentity(id); // validates existence
+  const patch: Parameters<typeof updateIdentity>[1] = {};
+  const warnings: Warning[] = [];
+  if (p.values['--name']) patch.name = p.values['--name'];
+  if (p.values['--email']) patch.email = p.values['--email'];
+  if (p.bools.has('--no-key')) patch.sshKeyPath = undefined;
+  if (p.values['--key']) {
+    const keySource = p.values['--key'];
+    if (!existsSync(keySource)) throw Errors.usage(`key file not found: ${keySource}`);
+    const imp = await importKey(keySource);
+    patch.sshKeyPath = imp.path;
+    patch.sshKeyFingerprint = imp.fingerprint;
+    if (imp.encrypted && !p.values['--passphrase-command']) {
+      warnings.push({
+        code: 'encrypted-key',
+        message: 'key is encrypted; provide --passphrase-command or run via the extension to load it at use time',
+      });
+    }
+  }
+  if (p.values['--passphrase-command']) patch.passphraseCommand = p.values['--passphrase-command'];
+  if (Object.keys(patch).length === 0) {
+    throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key / --passphrase-command');
+  }
+  const next = await updateIdentity(id, patch);
+  await appendAudit({
+    action: 'identity.set',
+    source: process.env.GIT_COLABOR_SOURCE === 'ext' ? 'ext' : 'cli',
+    identity: id,
+    identityName: next.name,
+    fingerprint: next.sshKeyFingerprint,
+    message: `set ${Object.keys(patch).join(', ')}`,
+  });
+  return ok({ identity: identityToJson(next) }, warnings);
 }
 
 async function logout(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {

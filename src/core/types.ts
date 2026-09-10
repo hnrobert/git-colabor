@@ -12,12 +12,14 @@ export type Identity = {
   email: string;
   /** "SHA256:…" from `ssh-keygen -lf` */
   sshKeyFingerprint?: string;
-  /** defaults to ~/.config/git-colabor/keys/<fingerprint> */
+  /** referenced key source path (absolute); never a copy */
   sshKeyPath?: string;
   /** shell command whose stdout is the passphrase (escape hatch for pure-CLI) */
   passphraseCommand?: string;
   /** informational, e.g. "github.com" */
   host?: string;
+  /** true when auto-imported from repo history (`identity import`) */
+  imported?: boolean;
   /** ISO8601 */
   createdAt: string;
 };
@@ -26,6 +28,8 @@ export type IdentityMap = {
   schemaVersion: 1;
   identities: Record<string, Identity>;
   defaultIdentity?: string;
+  /** lowercased emails hidden from auto-import (hide machine-level) */
+  hidden?: Record<string, true>;
 };
 
 export type HeldBy = {
@@ -59,6 +63,7 @@ export type AuditAction =
   | 'identity.logout'
   | 'identity.revert'
   | 'identity.import'
+  | 'identity.set'
   | 'coauthor.use'
   | 'coauthor.solo'
   | 'key.load'
