@@ -57,6 +57,8 @@ export type RepoState = {
   schemaVersion: 1;
   activeIdentity?: string;
   heldBy?: HeldBy;
+  /** user opted into SSH commit signing for this repo (right-click toggle) */
+  signing?: boolean;
   /** captured on first touch */
   backups?: Backups;
 };
@@ -67,6 +69,7 @@ export type AuditAction =
   | 'identity.revert'
   | 'identity.import'
   | 'identity.set'
+  | 'identity.sign'
   | 'coauthor.use'
   | 'coauthor.solo'
   | 'key.load'

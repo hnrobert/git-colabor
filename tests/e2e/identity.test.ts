@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { addIdentity, hideIdentityEmail, listIdentities, removeIdentity, updateIdentity } from '../../src/core/identity/map.js';
 import { applyIdentity } from '../../src/core/identity/apply.js';
 import { revertRepo } from '../../src/core/identity/revert.js';
+import { setCommitSigning } from '../../src/core/identity/sign.js';
 import { logoutIdentity } from '../../src/core/identity/logout.js';
 import { fingerprintOfFile, importKey } from '../../src/core/identity/keys.js';
 import { readState, writeState } from '../../src/core/repo/state.js';
@@ -158,7 +159,7 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(await getConfig('core.sshCommand', 'local', root)).toBeUndefined();
   });
 
-  it('apply with a key enables SSH commit signing; keyless apply clears it; revert restores', async () => {
+  it('signing is opt-in: apply writes none; identity sign toggles; revert restores', async () => {
     const keyDir = await mkdtemp(join(tmpdir(), 'ca-key-sign-'));
     const keyPath = join(keyDir, 'id_sign');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'sign'], { encoding: 'utf8' });
@@ -170,12 +171,27 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
       sshKeyPath: imp.path,
     });
     await applyIdentity(withKey.id, { source: 'cli', cwd: root });
+    expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined(); // opt-in: NOT auto-signed
+
+    await setCommitSigning({ source: 'cli', cwd: root, id: withKey.id, on: true });
     expect(await getConfig('commit.gpgsign', 'local', root)).toBe('true');
     expect(await getConfig('gpg.format', 'local', root)).toBe('ssh');
     expect(await getConfig('user.signingKey', 'local', root)).toBe(keyPath);
 
-    const keyless = await addIdentity({ name: 'NoKey', email: 'nokey@x.com' });
-    await applyIdentity(keyless.id, { source: 'cli', cwd: root });
+    // switching identity while signing is on re-binds to the new usable key
+    const key2Path = join(keyDir, 'id_sign2');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key2Path, '-C', 'sign2'], { encoding: 'utf8' });
+    const imp2 = await importKey(key2Path);
+    const second = await addIdentity({
+      name: 'Signer2',
+      email: 'signer2@x.com',
+      sshKeyFingerprint: imp2.fingerprint,
+      sshKeyPath: imp2.path,
+    });
+    await applyIdentity(second.id, { source: 'cli', cwd: root });
+    expect(await getConfig('user.signingKey', 'local', root)).toBe(key2Path);
+
+    await setCommitSigning({ source: 'cli', cwd: root, id: second.id, on: false });
     expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
     expect(await getConfig('user.signingKey', 'local', root)).toBeUndefined();
 

@@ -17,6 +17,7 @@ import { historyCommitters } from '../core/git/committers.js';
 import { importKey } from '../core/identity/keys.js';
 import { applyIdentity, applyResolvedIdentity } from '../core/identity/apply.js';
 import { revertRepo } from '../core/identity/revert.js';
+import { setCommitSigning } from '../core/identity/sign.js';
 import { logoutIdentity } from '../core/identity/logout.js';
 import { appendAudit, readAudit } from '../core/logging/audit.js';
 import { listAgent } from '../core/identity/agent.js';
@@ -43,6 +44,7 @@ const ADD_SPEC = {
 const AUDIT_SPEC = { valueFlags: ['--repo', '--since', '--tail'] };
 const APPLY_SPEC = { valueFlags: ['--name', '--email', '--ssh-command', '--source'] };
 const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--passphrase-command'], boolFlags: ['--no-key'] };
+const SIGN_SPEC = { valueFlags: [], boolFlags: ['--off'] };
 
 function identityToJson(i: Identity, defaultId?: string) {
   return {
@@ -53,6 +55,7 @@ function identityToJson(i: Identity, defaultId?: string) {
     host: i.host,
     // reference mode: a key counts only while the referenced file is still there
     hasKey: !!i.sshKeyPath && existsSync(i.sshKeyPath),
+    sshKeyPath: i.sshKeyPath,
     imported: !!i.imported,
     isDefault: i.id === defaultId,
   };
@@ -75,6 +78,8 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return importFromHistory(ctx);
     case 'set':
       return setIdentity(parseCommandArgs(tokens, SET_SPEC));
+    case 'sign':
+      return sign(parseCommandArgs(tokens, SIGN_SPEC), ctx);
     case 'rm':
       return rm(parseCommandArgs(tokens), ctx);
     case 'logout':
@@ -290,6 +295,14 @@ async function audit(p: CmdParsed): Promise<JsonResult> {
   return ok({ entries });
 }
 
+/** Toggle opt-in SSH commit signing for the repo with an identity's key. */
+async function sign(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
+  const id = p.positionals[0];
+  if (!id) throw Errors.usage('git colabor identity sign <id> [--off]');
+  const r = await setCommitSigning({ source: 'cli', cwd: ctx.cwd, id, on: !p.bools.has('--off') });
+  return ok(r);
+}
+
 async function revert(ctx: IdCtx): Promise<JsonResult> {
   const r = await revertRepo({ source: 'cli', cwd: ctx.cwd });
   return ok({ restored: r.restored ?? null, hadBackup: r.hadBackup });
@@ -315,12 +328,15 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
   const { identities, defaultIdentity } = await listIdentities();
   const rs = await repoStatus(ctx.cwd);
   const active = rs.activeIdentityId ? identities.find((i) => i.id === rs.activeIdentityId) : undefined;
+  const st = ctx.cwd ? await readState(ctx.cwd) : undefined;
+  const signingKey = await getConfig('user.signingKey', 'local', ctx.cwd);
   return ok({
     repo: rs.repo,
     inRepo: rs.inRepo,
     managed: rs.managed,
     managedBy: rs.managedBy,
     heldBy: rs.heldBy,
+    signing: { enabled: st?.signing === true, key: signingKey ?? null },
     activeIdentity: active ? identityToJson(active, defaultIdentity) : null,
     identities: identities.map((i) => ({ ...identityToJson(i, defaultIdentity), active: i.id === rs.activeIdentityId })),
     selected: rs.selected,

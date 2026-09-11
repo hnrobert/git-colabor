@@ -39,6 +39,7 @@ function topHelp(): string {
     '  git colabor identity add --name <n> --email <e> [--key <path>] [--passphrase-command <cmd>]',
     '  git colabor identity import   (add all history committers as identities)',
     '  git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key',
+    '  git colabor identity sign <id> [--off]   (opt-in SSH commit signing)',
     '  git colabor identity rm <id>',
     '  git colabor identity logout [id]',
     '  git colabor identity revert',
@@ -194,6 +195,12 @@ function identityHuman(command: string | undefined, d: unknown): string {
     return `Updated identity "${data.identity.name}" <${data.identity.email}> (${data.identity.id})${
       data.identity.hasKey ? ` key=${data.identity.sshKeyFingerprint ?? ''}` : ''
     }`;
+  }
+  if (command === 'sign') {
+    const data = d as { signing: boolean; key?: string };
+    return data.signing
+      ? `SSH commit signing ON (${data.key}).`
+      : 'SSH commit signing OFF.';
   }
   if (command === 'import') {
     const data = d as { added: IdentityJson[]; skipped: number };

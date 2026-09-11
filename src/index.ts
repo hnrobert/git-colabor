@@ -24,6 +24,7 @@ export * from './core/identity/keys.js';
 export * from './core/identity/agent.js';
 export * from './core/identity/apply.js';
 export * from './core/identity/revert.js';
+export * from './core/identity/sign.js';
 export * from './core/identity/logout.js';
 export * from './core/secrets/askpass-protocol.js';
 export * from './core/secrets/bridge.js';
