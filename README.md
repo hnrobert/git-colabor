@@ -126,7 +126,7 @@ This is the contract the VS Code extension consumes.
 
 (Windows: the data dir is `%APPDATA%\git-colabor`.)
 
-Git config keys **written locally** per repo: `user.name`, `user.email`, `core.sshCommand` (only when the identity has a key: `ssh -i <key> -o IdentitiesOnly=yes`), `colabor.managed=true`, `colabor.managed-by=cli|ext`, and multi-valued `colabor.selected` (`Name <email>` per co-author). `commit.template` is set **globally** only if unset in any scope.
+Git config keys **written locally** per repo: `user.name`, `user.email`, `core.sshCommand` (only when the identity has a key: `ssh -i <key> -o IdentitiesOnly=yes`), and — with a usable key — SSH commit signing (`commit.gpgsign=true`, `gpg.format=ssh`, `user.signingKey=<key path>`; switched to a key-less identity clears them), `colabor.managed=true`, `colabor.managed-by=cli|ext`, and multi-valued `colabor.selected` (`Name <email>` per co-author). `commit.template` is set **globally** only if unset in any scope.
 
 ## git-mob compatibility
 

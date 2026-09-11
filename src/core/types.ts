@@ -48,6 +48,9 @@ export type Backups = {
   userEmail?: string;
   sshCommand?: string;
   commitTemplate?: string;
+  commitGpgsign?: string;
+  gpgFormat?: string;
+  signingKey?: string;
 };
 
 export type RepoState = {

@@ -38,6 +38,9 @@ export async function revertRepo(opts: { source: Source; cwd?: string }): Promis
     await restoreKey('user.email', backups.userEmail, opts.cwd);
     await restoreKey('core.sshCommand', backups.sshCommand, opts.cwd);
     await restoreKey('commit.template', backups.commitTemplate, opts.cwd);
+    await restoreKey('commit.gpgsign', backups.commitGpgsign, opts.cwd);
+    await restoreKey('gpg.format', backups.gpgFormat, opts.cwd);
+    await restoreKey('user.signingKey', backups.signingKey, opts.cwd);
   }
 
   if (state.activeIdentity) {

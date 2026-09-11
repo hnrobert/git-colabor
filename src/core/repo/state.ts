@@ -26,13 +26,16 @@ export async function writeState(state: RepoState, cwd?: string): Promise<void> 
 
 /** Snapshot the repo's current identity-related git config (for backup on first touch). */
 export async function readCurrentIdentityConfig(cwd?: string): Promise<Backups> {
-  const [userName, userEmail, sshCommand, commitTemplate] = await Promise.all([
+  const [userName, userEmail, sshCommand, commitTemplate, commitGpgsign, gpgFormat, signingKey] = await Promise.all([
     getConfig('user.name', 'local', cwd),
     getConfig('user.email', 'local', cwd),
     getConfig('core.sshCommand', 'local', cwd),
     getConfig('commit.template', 'local', cwd),
+    getConfig('commit.gpgsign', 'local', cwd),
+    getConfig('gpg.format', 'local', cwd),
+    getConfig('user.signingKey', 'local', cwd),
   ]);
-  return { userName, userEmail, sshCommand, commitTemplate };
+  return { userName, userEmail, sshCommand, commitTemplate, commitGpgsign, gpgFormat, signingKey };
 }
 
 /**

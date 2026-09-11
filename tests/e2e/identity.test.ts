@@ -158,6 +158,32 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(await getConfig('core.sshCommand', 'local', root)).toBeUndefined();
   });
 
+  it('apply with a key enables SSH commit signing; keyless apply clears it; revert restores', async () => {
+    const keyDir = await mkdtemp(join(tmpdir(), 'ca-key-sign-'));
+    const keyPath = join(keyDir, 'id_sign');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'sign'], { encoding: 'utf8' });
+    const imp = await importKey(keyPath);
+    const withKey = await addIdentity({
+      name: 'Signer',
+      email: 'signer@x.com',
+      sshKeyFingerprint: imp.fingerprint,
+      sshKeyPath: imp.path,
+    });
+    await applyIdentity(withKey.id, { source: 'cli', cwd: root });
+    expect(await getConfig('commit.gpgsign', 'local', root)).toBe('true');
+    expect(await getConfig('gpg.format', 'local', root)).toBe('ssh');
+    expect(await getConfig('user.signingKey', 'local', root)).toBe(keyPath);
+
+    const keyless = await addIdentity({ name: 'NoKey', email: 'nokey@x.com' });
+    await applyIdentity(keyless.id, { source: 'cli', cwd: root });
+    expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
+    expect(await getConfig('user.signingKey', 'local', root)).toBeUndefined();
+
+    await revertRepo({ source: 'cli', cwd: root }); // had no signing before us → stays unset
+    expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
+    await rm(keyDir, { recursive: true, force: true });
+  });
+
   it('logout removes the key from the agent but never deletes the file', async () => {
     const keyDir = await mkdtemp(join(tmpdir(), 'ca-key2-'));
     const keyPath = join(keyDir, 'id_test');

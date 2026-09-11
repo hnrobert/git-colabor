@@ -1,4 +1,4 @@
-import { setConfig } from '../git/config.js';
+import { setConfig, unsetConfig } from '../git/config.js';
 import { topLevel } from '../git/rev.js';
 import { captureBackupIfFirstTouch, readState, writeState } from '../repo/state.js';
 import { detectConflict, nowHeldBy, cliSessionId, type ConflictInfo } from '../repo/coordination.js';
@@ -67,6 +67,18 @@ export async function applyResolvedIdentity(args: {
   await setConfig('user.name', name, 'local', opts.cwd);
   await setConfig('user.email', email, 'local', opts.cwd);
   if (sshCommand) await setConfig('core.sshCommand', sshCommand, 'local', opts.cwd);
+  // SSH commit signing rides on the same key: when the identity applies a
+  // usable key, sign commits with it (push already uses core.sshCommand);
+  // switching to a key-less identity clears the signing keys we manage.
+  if (identity?.sshKeyPath && sshCommand) {
+    await setConfig('commit.gpgsign', 'true', 'local', opts.cwd);
+    await setConfig('gpg.format', 'ssh', 'local', opts.cwd);
+    await setConfig('user.signingKey', identity.sshKeyPath, 'local', opts.cwd);
+  } else if (identity) {
+    await unsetConfig('commit.gpgsign', 'local', opts.cwd);
+    await unsetConfig('gpg.format', 'local', opts.cwd);
+    await unsetConfig('user.signingKey', 'local', opts.cwd);
+  }
   await setConfig('colabor.managed', 'true', 'local', opts.cwd);
   await setConfig('colabor.managed-by', opts.source, 'local', opts.cwd);
 
