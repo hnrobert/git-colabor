@@ -76,7 +76,10 @@ Selecting co-authors rewrites the commit template (`commit.template` / `~/.gitme
 | `identity ls` | List identities; `*` marks the default; shows key fingerprint. |
 | `identity use <id>` | Apply identity to the current repo (config + agent + state). Flags: `--source cli\|ext`, `--as-name`, `--as-email` (override committer fields), `--no-override` (refuse to take over a repo held by another session → exit 6). |
 | `identity add` | `--name`, `--email` (required); `--key <path>` (import), `--passphrase-command <cmd>`, `--host`, `--default`. |
-| `identity rm <id>` | Remove from the identity map (logs out first, best-effort). |
+| `identity rm <id>` | Remove from the identity map (logs out first, best-effort; imported identities are also hidden from future auto-imports). |
+| `identity import` | Add every distinct **committer** from the repo history as a key-less identity (idempotent, skips hidden emails; driven automatically by the extension on repo open). |
+| `identity set <id>` | Edit in place: `--name <n>`, `--email <e>`, `--key <path>` (re-reference), `--no-key` (clear), `--passphrase-command <cmd>`. |
+| `identity sign <id> [--off]` | Opt-in SSH commit signing with the identity's key — writes `commit.gpgsign=true`, `gpg.format=ssh`, `user.signingKey`; `--off` clears them. While on, `identity use` re-binds the signing key to the newly applied identity. |
 | `identity logout [id]` | Remove key from `ssh-agent` — the key file itself is never touched; repo stays configured (use `revert` for that). |
 | `identity revert` | Restore the repo's pre-tool `user.*` / `core.sshCommand` / `commit.template` from the first-touch backup, clear markers. |
 | `identity status` | Per-repo snapshot: active identity, managed markers, `heldBy`, selected + available co-authors. |
@@ -120,7 +123,7 @@ This is the contract the VS Code extension consumes.
 | --- | --- | --- |
 | `~/.config/git-colabor/identities.json` | Identity map (referenced key paths + fingerprints; env `GIT_COLABOR_MAP`) | `0600` |
 | `~/.config/git-colabor/audit.log` | JSONL audit trail | `0600` |
-| `<git-dir>/colabor/state.json` | Per-repo state: active identity, `heldBy`, config backups | `0600` |
+| `<git-dir>/colabor/state.json` | Per-repo state: active identity, `heldBy`, opt-in signing flag, config backups | `0600` |
 | `.git-coauthors` (repo, else `~/.git-coauthors`) | Co-author catalogue, git-mob-compatible JSON | — |
 | `~/.gitmessage` (or `commit.template`) | Commit template seeded with trailers | — |
 
