@@ -22,8 +22,8 @@ import { logoutIdentity } from '../core/identity/logout.js';
 import { appendAudit, readAudit } from '../core/logging/audit.js';
 import { listAgent } from '../core/identity/agent.js';
 import { getConfig } from '../core/git/config.js';
-import { insideWorkTree } from '../core/git/rev.js';
-import { readState } from '../core/repo/state.js';
+import { insideWorkTree, topLevel } from '../core/git/rev.js';
+import { readState, writeState } from '../core/repo/state.js';
 import { repoStatus } from '../core/repo/status.js';
 import { auditLogPath, mapPath } from '../core/paths.js';
 import type { Diagnostic, Identity, JsonResult, Source, Warning } from '../core/types.js';
@@ -56,13 +56,23 @@ function identityToJson(i: Identity, defaultId?: string) {
     // reference mode: a key counts only while the referenced file is still there
     hasKey: !!i.sshKeyPath && existsSync(i.sshKeyPath),
     sshKeyPath: i.sshKeyPath,
+    keyEncrypted: !!i.sshKeyEncrypted,
     imported: !!i.imported,
+    disabled: !!i.disabled,
     isDefault: i.id === defaultId,
   };
 }
 
 function asSource(v: string | undefined): Source {
   return v === 'ext' ? 'ext' : 'cli';
+}
+
+async function safeTopLevel(cwd?: string): Promise<string | undefined> {
+  try {
+    return await topLevel(cwd);
+  } catch {
+    return undefined;
+  }
 }
 
 export async function dispatch(command: string | undefined, tokens: string[], ctx: IdCtx): Promise<JsonResult> {
@@ -80,6 +90,8 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return setIdentity(parseCommandArgs(tokens, SET_SPEC));
     case 'sign':
       return sign(parseCommandArgs(tokens, SIGN_SPEC), ctx);
+    case 'disable':
+      return disable(parseCommandArgs(tokens), ctx);
     case 'rm':
       return rm(parseCommandArgs(tokens), ctx);
     case 'logout':
@@ -107,6 +119,9 @@ async function ls(): Promise<JsonResult> {
 async function use(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const id = p.positionals[0];
   if (!id) throw Errors.usage('git colabor identity use <id>');
+  // an explicit use is explicit intent — re-enable a disabled identity
+  const current = await getIdentity(id);
+  if (current.disabled) await updateIdentity(id, { disabled: undefined });
   const { identity, result } = await applyIdentity(id, {
     source: asSource(p.values['--source']),
     cwd: ctx.cwd,
@@ -148,6 +163,7 @@ async function add(p: CmdParsed): Promise<JsonResult> {
   const warnings: Warning[] = [];
   let sshKeyFingerprint: string | undefined;
   let sshKeyPath: string | undefined;
+  let sshKeyEncrypted: boolean | undefined;
   let encrypted: boolean | null = null;
   const keySource = p.values['--key'];
   if (keySource) {
@@ -156,6 +172,7 @@ async function add(p: CmdParsed): Promise<JsonResult> {
     sshKeyFingerprint = imp.fingerprint;
     sshKeyPath = imp.path;
     encrypted = imp.encrypted;
+    sshKeyEncrypted = imp.encrypted;
     if (imp.encrypted && !p.values['--passphrase-command']) {
       warnings.push({
         code: 'encrypted-key',
@@ -173,6 +190,7 @@ async function add(p: CmdParsed): Promise<JsonResult> {
     email,
     sshKeyFingerprint,
     sshKeyPath,
+    sshKeyEncrypted,
     passphraseCommand: p.values['--passphrase-command'],
     host: p.values['--host'],
   });
@@ -301,6 +319,38 @@ async function sign(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   if (!id) throw Errors.usage('git colabor identity sign <id> [--off]');
   const r = await setCommitSigning({ source: 'cli', cwd: ctx.cwd, id, on: !p.bools.has('--off') });
   return ok(r);
+}
+
+/**
+ * Disable an identity (passphrase wrong / cancelled / unavailable) and clear
+ * it as the repo's active identity — the repo is left identity-less
+ * ("悬空"): no active identity, reconcile skips it, no prompt loop. An
+ * explicit `identity use` re-enables. Repo config is left as-is.
+ */
+async function disable(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
+  const id = p.positionals[0];
+  if (!id) throw Errors.usage('git colabor identity disable <id>');
+  const identity = await getIdentity(id);
+  await updateIdentity(id, { disabled: true });
+  let deactivated = false;
+  if (ctx.cwd) {
+    const state = await readState(ctx.cwd);
+    if (state.activeIdentity === id) {
+      state.activeIdentity = undefined;
+      state.heldBy = undefined;
+      await writeState(state, ctx.cwd);
+      deactivated = true;
+    }
+  }
+  await appendAudit({
+    action: 'identity.disable',
+    source: process.env.GIT_COLABOR_SOURCE === 'ext' ? 'ext' : 'cli',
+    identity: id,
+    identityName: identity.name,
+    repo: deactivated ? await safeTopLevel(ctx.cwd) : undefined,
+    message: deactivated ? 'deactivated in repo' : 'disabled',
+  });
+  return ok({ disabled: id, deactivated });
 }
 
 async function revert(ctx: IdCtx): Promise<JsonResult> {

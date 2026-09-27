@@ -20,6 +20,10 @@ export type Identity = {
   host?: string;
   /** true when auto-imported from repo history (`identity import`) */
   imported?: boolean;
+  /** true when the referenced key is passphrase-protected (probed at import) */
+  sshKeyEncrypted?: boolean;
+  /** set when a passphrase failure disabled the identity — explicit `use` re-enables */
+  disabled?: boolean;
   /** ISO8601 */
   createdAt: string;
 };
@@ -70,6 +74,7 @@ export type AuditAction =
   | 'identity.import'
   | 'identity.set'
   | 'identity.sign'
+  | 'identity.disable'
   | 'coauthor.use'
   | 'coauthor.solo'
   | 'key.load'

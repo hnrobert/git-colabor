@@ -40,6 +40,7 @@ function topHelp(): string {
     '  git colabor identity import   (add all history committers as identities)',
     '  git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key',
     '  git colabor identity sign <id> [--off]   (opt-in SSH commit signing)',
+    '  git colabor identity disable <id>        (deactivate on key/passphrase failure)',
     '  git colabor identity rm <id>',
     '  git colabor identity logout [id]',
     '  git colabor identity revert',
