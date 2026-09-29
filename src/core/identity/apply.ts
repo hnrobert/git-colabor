@@ -1,4 +1,7 @@
+import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { setConfig } from '../git/config.js';
+import { dataDir } from '../paths.js';
 import { topLevel } from '../git/rev.js';
 import { captureBackupIfFirstTouch, readState, writeState } from '../repo/state.js';
 import { detectConflict, nowHeldBy, cliSessionId, type ConflictInfo } from '../repo/coordination.js';
@@ -112,6 +115,33 @@ export async function applyResolvedIdentity(args: {
 }
 
 /**
+ * The `core.sshCommand` for a key. When driven by the extension (askpass
+ * bundle known), bake the SSH_ASKPASS prefix into the command so push/fetch
+ * over this key gets its passphrase from the extension's session store even
+ * with no tty and no ssh-agent — git runs core.sshCommand through a shell,
+ * so the env assignment prefix is honored. Plain CLI use (no bundle) keeps
+ * the bare ssh command.
+ *
+ * ssh execve()s the SSH_ASKPASS path, so the .cjs bundle needs an executable
+ * wrapper that re-execs it with the running node (the VS Code Server's node
+ * on remote hosts — not necessarily on PATH). The wrapper is written to the
+ * data dir (idempotent) and used as the SSH_ASKPASS value.
+ */
+export async function ensureAskpassWrapper(askpassScriptPath: string): Promise<string> {
+  const wrapperPath = join(dataDir(), 'askpass-wrapper.sh');
+  const content = `#!/bin/sh\nexec "${process.execPath}" "${askpassScriptPath}" "$@"\n`;
+  try {
+    const existing = await readFile(wrapperPath, 'utf8');
+    if (existing === content) return wrapperPath;
+  } catch {
+    // not there yet — write below
+  }
+  await writeFile(wrapperPath, content, { mode: 0o700 });
+  await chmod(wrapperPath, 0o700); // existing file keeps its old mode
+  return wrapperPath;
+}
+
+/**
  * Resolve an identity from the map, then apply it. `asName`/`asEmail` override the committer
  * name/email (used by the extension reconcile path where the VS Code setting wins).
  */
@@ -127,7 +157,13 @@ export async function applyIdentity(
     // reference (moved/renamed/deleted) degrades to a key-less apply —
     // name/email still switch, no core.sshCommand is written, agent load skipped.
     if (await keyUsable(identity.sshKeyPath)) {
-      sshCommand = `ssh -i ${identity.sshKeyPath} -o IdentitiesOnly=yes`;
+      const bare = `ssh -i ${identity.sshKeyPath} -o IdentitiesOnly=yes`;
+      if (opts.askpassScriptPath) {
+        const wrapper = await ensureAskpassWrapper(opts.askpassScriptPath);
+        sshCommand = `SSH_ASKPASS="${wrapper}" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 ${bare}`;
+      } else {
+        sshCommand = bare;
+      }
     } else {
       keyMissing = true;
     }
