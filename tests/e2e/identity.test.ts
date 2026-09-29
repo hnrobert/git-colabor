@@ -15,6 +15,8 @@ import { cliSessionId, detectConflict } from '../../src/core/repo/coordination.j
 import { readAudit } from '../../src/core/logging/audit.js';
 import { repoStatus } from '../../src/core/repo/status.js';
 import { historyCommitters } from '../../src/core/git/committers.js';
+import { loadKey } from '../../src/core/identity/agent.js';
+import { writeFile, chmod as chmodFile } from 'node:fs/promises';
 import { importFromHistory } from '../../src/cli/identity.js';
 
 function git(cwd: string, args: string[]): string {
@@ -157,6 +159,43 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(result.sshCommand).toBeUndefined();
     expect(await getConfig('user.name', 'local', root)).toBe('GoneKey');
     expect(await getConfig('core.sshCommand', 'local', root)).toBeUndefined();
+  });
+
+  it('loadKey verifies passphrases correctly with or without an ssh-agent', async () => {
+    const keyDir = await mkdtemp(join(tmpdir(), 'ca-key-load-'));
+    const keyPath = join(keyDir, 'id_enc');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', 's3cret', '-f', keyPath, '-C', 'load'], { encoding: 'utf8' });
+    const fingerprint = await fingerprintOfFile(keyPath);
+    // a fake askpass: answers from TEST_PASS (kept off argv), like the real bridge
+    const askpass = join(keyDir, 'askpass.sh');
+    await writeFile(askpass, '#!/bin/sh\nprintf "%s\\n" "$TEST_PASS"\n');
+    await chmodFile(askpass, 0o700);
+    const prevPass = process.env.TEST_PASS;
+
+    process.env.TEST_PASS = 's3cret';
+    const okLoad = await loadKey({
+      keyPath,
+      fingerprint,
+      askpassScriptPath: askpass,
+      socketPath: '/nonexistent/fake.sock', // force the askpass strategy; no real bridge needed
+      token: 'fake-token',
+    });
+    expect(okLoad.loaded).toBe(true);
+    expect(['askpass', 'keygen-verify']).toContain(okLoad.via);
+
+    process.env.TEST_PASS = 'wrong-pass';
+    const badLoad = await loadKey({
+      keyPath,
+      fingerprint,
+      askpassScriptPath: askpass,
+      socketPath: '/nonexistent/fake.sock',
+      token: 'fake-token',
+    });
+    expect(badLoad.loaded).toBe(false); // wrong passphrase is detected — no false "wrong password" for correct ones
+
+    if (prevPass === undefined) delete process.env.TEST_PASS;
+    else process.env.TEST_PASS = prevPass;
+    await rm(keyDir, { recursive: true, force: true });
   });
 
   it('signing is opt-in: apply writes none; identity sign toggles; revert restores', async () => {

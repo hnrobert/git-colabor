@@ -92,7 +92,9 @@ export async function applyResolvedIdentity(args: {
     keyLoaded = await loadKey({
       keyPath: identity.sshKeyPath,
       fingerprint: identity.sshKeyFingerprint,
-      askpassScriptPath: opts.askpassScriptPath,
+      // ssh/ssh-add/ssh-keygen execve() SSH_ASKPASS — the .cjs bundle is not
+      // executable, so route through the generated shell wrapper
+      askpassScriptPath: opts.askpassScriptPath ? await ensureAskpassWrapper(opts.askpassScriptPath) : undefined,
       socketPath: opts.socketPath,
       token: opts.token,
       passphraseCommand: identity.passphraseCommand,

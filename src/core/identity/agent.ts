@@ -12,7 +12,11 @@ export type LoadKeyOpts = {
   useAppleKeychain?: boolean;
 };
 
-export type LoadResult = { loaded: boolean; via: 'plain' | 'apple-keychain' | 'askpass' | 'tty' | 'none'; message?: string };
+export type LoadResult = {
+  loaded: boolean;
+  via: 'plain' | 'apple-keychain' | 'askpass' | 'keygen-verify' | 'tty' | 'none';
+  message?: string;
+};
 
 function runInherit(cmdArgs: string[], env?: NodeJS.ProcessEnv, stdinNull = false): Promise<number> {
   return new Promise((resolve) => {
@@ -21,8 +25,15 @@ function runInherit(cmdArgs: string[], env?: NodeJS.ProcessEnv, stdinNull = fals
       env: env ?? process.env,
       stdio: [stdinNull ? 'ignore' : 'inherit', 'inherit', 'pipe'],
     });
-    child.on('error', () => resolve(127));
-    child.on('close', (c) => resolve(c ?? 127));
+    const killTimer = setTimeout(() => child.kill('SIGKILL'), 10_000); // never hang on a stuck child
+    child.on('error', () => {
+      clearTimeout(killTimer);
+      resolve(127);
+    });
+    child.on('close', (c) => {
+      clearTimeout(killTimer);
+      resolve(c ?? 127);
+    });
   });
 }
 
@@ -84,7 +95,39 @@ export async function loadKey(opts: LoadKeyOpts): Promise<LoadResult> {
     const useSetsid = process.platform !== 'win32' && hasBin('setsid');
     code = await runInherit(useSetsid ? ['setsid', 'ssh-add', opts.keyPath] : ['ssh-add', opts.keyPath], env, true);
     if (code === 0) return { loaded: true, via: 'askpass' };
-    return { loaded: false, via: 'askpass', message: `ssh-add exited ${code}` };
+
+    // ssh-add failed — on hosts with NO ssh-agent it cannot even ask (dies
+    // with "Could not open a connection"). Validate the passphrase with
+    // `ssh-keygen -y` under the same askpass env instead: exit 0 proves the
+    // passphrase is correct, and the key unlocks at ssh time through the
+    // SSH_ASKPASS prefix baked into core.sshCommand. This is also the only
+    // reliable WRONG-passphrase detector on agent-less hosts. Output is
+    // captured (not inherited): ssh-keygen -y prints the PUBLIC KEY, which
+    // would corrupt the CLI's own --json stdout.
+    const verifyQuiet = (args: string[]): Promise<number> =>
+      new Promise((resolve) => {
+        const child = spawn('ssh-keygen', args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+        const killTimer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+        child.on('error', () => {
+          clearTimeout(killTimer);
+          resolve(127);
+        });
+        child.on('close', (c) => {
+          clearTimeout(killTimer);
+          resolve(c ?? 127);
+        });
+      });
+    const verify = await verifyQuiet(['-y', '-P', '', '-f', opts.keyPath]).then((c) =>
+      c === 0 ? Promise.resolve(0) : verifyQuiet(['-y', '-f', opts.keyPath]),
+    );
+    if (verify === 0) {
+      return {
+        loaded: true,
+        via: 'keygen-verify',
+        message: 'passphrase verified (no ssh-agent — the key unlocks at ssh time via SSH_ASKPASS)',
+      };
+    }
+    return { loaded: false, via: 'askpass', message: 'passphrase rejected' };
   }
 
   // 4. interactive tty
