@@ -317,7 +317,13 @@ async function audit(p: CmdParsed): Promise<JsonResult> {
 async function sign(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const id = p.positionals[0];
   if (!id) throw Errors.usage('git colabor identity sign <id> [--off]');
-  const r = await setCommitSigning({ source: 'cli', cwd: ctx.cwd, id, on: !p.bools.has('--off') });
+  const r = await setCommitSigning({
+    source: 'cli',
+    cwd: ctx.cwd,
+    id,
+    on: !p.bools.has('--off'),
+    askpassScriptPath: ctx.askpassScriptPath,
+  });
   return ok(r);
 }
 

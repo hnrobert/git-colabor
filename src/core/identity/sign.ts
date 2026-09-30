@@ -1,11 +1,15 @@
 import { setConfig, unsetConfig } from '../git/config.js';
-import { topLevel } from '../git/rev.js';
-import { insideWorkTree } from '../git/rev.js';
+import { topLevel, insideWorkTree } from '../git/rev.js';
 import { readState, writeState } from '../repo/state.js';
 import { getIdentity } from './map.js';
 import { keyUsable } from './keys.js';
 import { appendAudit } from '../logging/audit.js';
 import { Errors } from '../errors.js';
+import { dataDir } from '../paths.js';
+import { ensureAskpassWrapper } from './apply.js';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import type { Source } from '../types.js';
 
 async function safeTopLevel(cwd?: string): Promise<string | undefined> {
@@ -17,16 +21,38 @@ async function safeTopLevel(cwd?: string): Promise<string | undefined> {
 }
 
 /**
+ * Create the signing wrapper: a shell script that execs `ssh-keygen` with
+ * SSH_ASKPASS pointing at our askpass helper. git invokes `gpg.ssh.program`
+ * for every commit-signing operation, so the passphrase is fetched from the
+ * extension's session store without prompting the user each time.
+ */
+export async function ensureSignWrapper(askpassScriptPath?: string): Promise<string> {
+  const wrapperPath = join(dataDir(), 'sign-wrapper.sh');
+  const askpass = askpassScriptPath ? await ensureAskpassWrapper(askpassScriptPath) : join(dataDir(), 'askpass-wrapper.sh');
+  const content = `#!/bin/sh\nSSH_ASKPASS="${askpass}" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 exec ssh-keygen "$@"\n`;
+  if (existsSync(wrapperPath)) {
+    const existing = await readFile(wrapperPath, 'utf8');
+    if (existing === content) return wrapperPath;
+  }
+  await writeFile(wrapperPath, content, { mode: 0o700 });
+  await chmod(wrapperPath, 0o700);
+  return wrapperPath;
+}
+
+/**
  * Toggle SSH commit signing for a repo (the right-click "Sign commits with
  * this key" / "Stop signing" action). Opt-in: `identity use` never turns
  * signing on by itself; when signing is enabled it re-binds to the applied
- * identity's usable key.
+ * identity's usable key. When driven by the extension (askpassScriptPath
+ * known) `gpg.ssh.program` is set to a wrapper so commit signing gets its
+ * passphrase from the session store without prompting every commit.
  */
 export async function setCommitSigning(opts: {
   source: Source;
   cwd?: string;
   id: string;
   on: boolean;
+  askpassScriptPath?: string;
 }): Promise<{ signing: boolean; key?: string }> {
   if (!(await insideWorkTree(opts.cwd))) throw Errors.notARepo(opts.cwd);
   const state = await readState(opts.cwd);
@@ -37,6 +63,7 @@ export async function setCommitSigning(opts: {
     await unsetConfig('commit.gpgsign', 'local', opts.cwd);
     await unsetConfig('gpg.format', 'local', opts.cwd);
     await unsetConfig('user.signingKey', 'local', opts.cwd);
+    await unsetConfig('gpg.ssh.program', 'local', opts.cwd);
     await appendAudit({ action: 'identity.sign', source: opts.source, identity: opts.id, repo: await safeTopLevel(opts.cwd), result: 'ok', message: 'signing off' });
     return { signing: false };
   }
@@ -50,6 +77,10 @@ export async function setCommitSigning(opts: {
   await setConfig('commit.gpgsign', 'true', 'local', opts.cwd);
   await setConfig('gpg.format', 'ssh', 'local', opts.cwd);
   await setConfig('user.signingKey', identity.sshKeyPath, 'local', opts.cwd);
+  if (opts.askpassScriptPath) {
+    const signWrapper = await ensureSignWrapper(opts.askpassScriptPath);
+    await setConfig('gpg.ssh.program', signWrapper, 'local', opts.cwd);
+  }
   await appendAudit({
     action: 'identity.sign',
     source: opts.source,
