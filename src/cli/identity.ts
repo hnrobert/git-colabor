@@ -61,6 +61,8 @@ function identityToJson(i: Identity, defaultId?: string) {
     keyEncrypted: !!i.sshKeyEncrypted,
     imported: !!i.imported,
     disabled: !!i.disabled,
+    scope: i.scope ?? (i.imported ? 'project' : 'machine'),
+    remoteKeys: i.remoteKeys,
     isDefault: i.id === defaultId,
   };
 }

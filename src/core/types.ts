@@ -24,6 +24,10 @@ export type Identity = {
   sshKeyEncrypted?: boolean;
   /** set when a passphrase failure disabled the identity — explicit `use` re-enables */
   disabled?: boolean;
+  /** where this identity is remembered: user (vscode config), machine (identities.json), or project (repo scan) */
+  scope?: 'user' | 'machine' | 'project';
+  /** per-remote key paths: { "origin": "/path/to/key", ... } — keyed by git remote name */
+  remoteKeys?: Record<string, string>;
   /** ISO8601 */
   createdAt: string;
 };
