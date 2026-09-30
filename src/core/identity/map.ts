@@ -76,6 +76,22 @@ export async function hideIdentityEmail(email: string): Promise<void> {
   await writeMap(map);
 }
 
+/** Remove an email from the hidden list (unhide / restore). */
+export async function unhideIdentityEmail(email: string): Promise<boolean> {
+  const map = await readMap();
+  const key = email.toLowerCase();
+  if (!map.hidden?.[key]) return false;
+  delete map.hidden[key];
+  await writeMap(map);
+  return true;
+}
+
+/** All hidden emails (lowercased) for the "show hidden identities" picker. */
+export async function listHiddenEmails(): Promise<string[]> {
+  const map = await readMap();
+  return Object.keys(map.hidden ?? {});
+}
+
 export async function removeIdentity(id: string): Promise<void> {
   const map = await readMap();
   if (!map.identities[id]) throw Errors.usage(`identity "${id}" not found`);

@@ -7,10 +7,12 @@ import {
   addIdentity,
   getIdentity,
   hideIdentityEmail,
+  listHiddenEmails,
   listIdentities,
   readMap,
   removeIdentity,
   setDefault,
+  unhideIdentityEmail,
   updateIdentity,
 } from '../core/identity/map.js';
 import { historyCommitters } from '../core/git/committers.js';
@@ -92,6 +94,10 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return sign(parseCommandArgs(tokens, SIGN_SPEC), ctx);
     case 'disable':
       return disable(parseCommandArgs(tokens), ctx);
+    case 'unhide':
+      return unhide(parseCommandArgs(tokens));
+    case 'hidden':
+      return hiddenLs();
     case 'rm':
       return rm(parseCommandArgs(tokens), ctx);
     case 'logout':
@@ -311,6 +317,20 @@ async function audit(p: CmdParsed): Promise<JsonResult> {
     tail: p.values['--tail'] ? Number(p.values['--tail']) : undefined,
   });
   return ok({ entries });
+}
+
+/** Remove an email from the hidden list (restore for auto-import). */
+async function unhide(p: CmdParsed): Promise<JsonResult> {
+  const email = p.positionals[0];
+  if (!email) throw Errors.usage('git colabor identity unhide <email>');
+  const removed = await unhideIdentityEmail(email);
+  if (!removed) throw Errors.usage(`"${email}" is not hidden`);
+  return ok({ unhid: email.toLowerCase() });
+}
+
+/** List all hidden emails. */
+async function hiddenLs(): Promise<JsonResult> {
+  return ok({ hidden: await listHiddenEmails() });
 }
 
 /** Toggle opt-in SSH commit signing for the repo with an identity's key. */
