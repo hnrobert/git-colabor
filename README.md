@@ -1,6 +1,6 @@
 # git-colabor
 
-**`git colabor`** — switch the Git **committer + pusher identity** and **SSH key** per repository, and manage git-mob-style **co-authors**, from one CLI.
+**`git colabor`** — switch the Git **committer + pusher identity** and **SSH key** per repository, and manage **co-authors** with a better experience, from one CLI.
 
 This is the CLI half of Git Colabor. A VS Code extension ([`vscode-git-colabor`](https://github.com/hnrobert/vscode-git-colabor)) bundles this binary and drives it over its `--json` interface — but the CLI is fully standalone and scriptable.
 
