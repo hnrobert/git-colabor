@@ -20,8 +20,6 @@ export type Identity = {
   host?: string;
   /** true when auto-imported from repo history (`identity import`) */
   imported?: boolean;
-  /** all repo top-level paths this identity was found in (project-scoped display filter) */
-  importedFrom?: string[];
   /** true when the referenced key is passphrase-protected (probed at import) */
   sshKeyEncrypted?: boolean;
   /** set when a passphrase failure disabled the identity — explicit `use` re-enables */

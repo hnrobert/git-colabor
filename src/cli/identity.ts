@@ -62,7 +62,6 @@ function identityToJson(i: Identity, defaultId?: string) {
     imported: !!i.imported,
     disabled: !!i.disabled,
     scope: i.scope ?? (i.imported ? 'project' : 'machine'),
-    importedFrom: i.importedFrom, // string[] of repo roots
     remoteKeys: i.remoteKeys,
     isDefault: i.id === defaultId,
   };
@@ -217,27 +216,17 @@ async function add(p: CmdParsed): Promise<JsonResult> {
 export async function importFromHistory(ctx: IdCtx): Promise<JsonResult> {
   if (!(await insideWorkTree(ctx.cwd))) throw Errors.notARepo(ctx.cwd);
   const committers = await historyCommitters(ctx.cwd);
-  const repoRoot = await safeTopLevel(ctx.cwd);
   const map = await readMap();
   const known = new Set(Object.values(map.identities).map((i) => i.email.toLowerCase()));
   const hidden = new Set(Object.keys(map.hidden ?? {}));
   const added: Identity[] = [];
   for (const c of committers) {
     const id = c.email.toLowerCase();
-    if (hidden.has(id)) continue;
-    const existing = Object.values(map.identities).find((i) => i.email.toLowerCase() === id);
-    if (existing) {
-      // already known — just record this repo as another source (append, don't duplicate)
-      if (repoRoot && !(existing.importedFrom ?? []).includes(repoRoot)) {
-        await updateIdentity(existing.id, { importedFrom: [...(existing.importedFrom ?? []), repoRoot] });
-      }
-      continue;
-    }
+    if (known.has(id) || hidden.has(id)) continue;
     const identity = await addIdentity({
       name: c.name,
       email: c.email,
       imported: true,
-      importedFrom: repoRoot ? [repoRoot] : undefined,
       scope: 'project',
     });
     known.add(id);
