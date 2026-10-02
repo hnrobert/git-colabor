@@ -1,7 +1,7 @@
 import { gitRaw } from './exec.js';
 import { Author, genKey } from '../authors/types.js';
 
-const SHORTLOG_LINE = /^\d+\t(.+)\s<(.+)>$/;
+const SHORTLOG_LINE = /^\s*\d+\t(.+)\s<(.+)>$/;
 
 /**
  * Enumerate contributors of the current repo via `git shortlog -seni HEAD`.
