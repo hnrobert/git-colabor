@@ -3,7 +3,6 @@
  * build pipeline and by direct require()). The CLI is bundled separately as dist/cli.cjs.
  */
 export * from './core/authors/types.js';
-export * from './core/authors/store.js';
 export * from './core/message/formatter.js';
 export * from './core/message/template.js';
 export * from './core/coauthors/state.js';

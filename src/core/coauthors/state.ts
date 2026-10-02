@@ -1,5 +1,4 @@
 import { addConfigValue, getAllConfig, unsetAllConfig } from '../git/config.js';
-import { listAuthors } from '../authors/store.js';
 import { Author } from '../authors/types.js';
 import { writeCoAuthorsToTemplate, clearTemplate, ensureCommitTemplate } from '../message/template.js';
 
@@ -12,15 +11,11 @@ export async function getSelected(cwd?: string): Promise<Author[]> {
     .split(/\r?\n/)
     .filter(Boolean);
   if (raw.length === 0) return [];
-  const all = await listAuthors(undefined, cwd);
   const out: Author[] = [];
   for (const line of raw) {
     const m = line.match(LINE_RE);
     if (!m) continue;
-    const name = m[1].trim();
-    const email = m[2].trim();
-    const found = all.find((a) => a.email === email);
-    out.push(found ?? new Author(email.split('@')[0] || 'co', name, email));
+    out.push(new Author(m[2].split('@')[0] || 'co', m[1].trim(), m[2].trim()));
   }
   return out;
 }

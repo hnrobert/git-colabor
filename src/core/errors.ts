@@ -44,16 +44,16 @@ export const Errors = {
   authorNotFound: (key: string) =>
     new AppError({
       code: 'AUTHOR_NOT_FOUND',
-      message: `Author with initials "${key}" not found in .git-coauthors`,
+      message: `Author with initials "${key}" not found in identities`,
       exitCode: EXIT_CODES.NOT_FOUND,
       hints: [`Add it with: git colabor coauthor add ${key} "Full Name" email@example.com`],
     }),
   duplicateKey: (key: string) =>
     new AppError({
       code: 'DUPLICATE_KEY',
-      message: `Key "${key}" already exists in .git-coauthors`,
+      message: `Key "${key}" already exists`,
       exitCode: EXIT_CODES.NOT_FOUND,
-      hints: ['Edit .git-coauthors directly to change an existing entry.'],
+      hints: [],
     }),
   invalidEmail: (email: string) =>
     new AppError({ code: 'INVALID_EMAIL', message: `Invalid email: ${email}`, exitCode: EXIT_CODES.USAGE }),

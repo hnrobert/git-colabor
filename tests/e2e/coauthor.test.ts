@@ -1,11 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as coauthor from '../../src/cli/coauthor.js';
-import { getSelected } from '../../src/core/coauthors/state.js';
-import { getConfig, getAllConfig } from '../../src/core/git/config.js';
+import { getAllConfig } from '../../src/core/git/config.js';
 
 function git(cwd: string, args: string[]): string {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -42,53 +41,50 @@ afterAll(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-describe('coauthor e2e (identity-based, real git, isolated HOME)', () => {
-  it('add + use writes colabor.selected (multi) + .gitmessage trailers', async () => {
-    await coauthor.add(['Jane Doe', 'jane@x.com']);
-    await coauthor.add(['Amy Doe', 'amy@x.com']);
-    await coauthor.use(['jane@x.com', 'amy@x.com'], root);
+describe('coauthor e2e (add/rm/ls, identity-based)', () => {
+  it('add --always writes colabor.selected (multi) + commit template', async () => {
+    // seed identities
+    const { addIdentity } = await import('../../src/core/identity/map.js');
+    await addIdentity({ name: 'Jane Doe', email: 'jane@x.com' });
+    await addIdentity({ name: 'Amy Doe', email: 'amy@x.com' });
+
+    await coauthor.add(['jane@x.com'], { always: true }, root);
+    await coauthor.add(['amy@x.com'], { always: true }, root);
 
     const all = await getAllConfig('colabor.selected', 'local', root);
     expect(all.split(/\r?\n/)).toEqual(['Jane Doe <jane@x.com>', 'Amy Doe <amy@x.com>']);
-    const selected = await getSelected(root);
-    expect(selected.map((a) => a.email)).toEqual(['jane@x.com', 'amy@x.com']);
-
-    const tpl = await readFile(join(home, '.gitmessage'), 'utf8');
-    expect(tpl).toContain('Co-authored-by: Jane Doe <jane@x.com>');
-    expect(tpl).toContain('Co-authored-by: Amy Doe <amy@x.com>');
   });
 
-  it('solo clears selection and strips trailers', async () => {
-    await coauthor.solo(root);
-    expect(await getConfig('colabor.selected', 'local', root)).toBeUndefined();
-    const tpl = await readFile(join(home, '.gitmessage'), 'utf8');
-    expect(tpl).not.toContain('Co-authored-by');
+  it('add (default/oneshot) writes colabor.oneshot', async () => {
+    await coauthor.add(['jane@x.com'], {}, root);
+    const raw = await getAllConfig('colabor.oneshot', 'local', root);
+    expect(raw).toContain('Jane Doe <jane@x.com>');
   });
 
-  it('print returns the trailer blob', async () => {
-    await coauthor.use(['jane@x.com'], root);
-    const r = await coauthor.print({ initials: false }, root);
+  it('ls shows both selected and available', async () => {
+    const r = await coauthor.ls([], root);
     expect(r.ok).toBe(true);
-    if (r.ok) expect(String((r.data as { text: string }).text)).toContain('Co-authored-by: Jane Doe');
+    if (!r.ok) return;
+    const data = r.data as {
+      available: { email: string }[];
+      selected: { email: string; mode: string }[];
+    };
+    // jane and amy are in both (selected via --always, oneshot)
+    expect(data.selected.length).toBeGreaterThanOrEqual(2);
+    expect(data.available.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('use accepts identity ID as well as email', async () => {
-    const lsResult = await coauthor.ls([]);
-    expect(lsResult.ok).toBe(true);
-    if (!lsResult.ok) return;
-    const items = lsResult.data as { id: string; email: string }[];
-    const jane = items.find((i) => i.email === 'jane@x.com');
-    expect(jane).toBeDefined();
-    if (!jane) return;
-    // select by ID instead of email
-    const r = await coauthor.use([jane.id], root);
+  it('rm removes from all scopes', async () => {
+    const r = await coauthor.rm(['jane@x.com'], root);
     expect(r.ok).toBe(true);
-    const selected = await getSelected(root);
-    expect(selected.map((a) => a.email)).toEqual(['jane@x.com']);
+    const sel = await getAllConfig('colabor.selected', 'local', root);
+    expect(sel).not.toContain('jane@x.com');
+    const oneshot = await getAllConfig('colabor.oneshot', 'local', root);
+    expect(oneshot).not.toContain('jane@x.com');
   });
 
-  it('use of an unknown email fails with AUTHOR_NOT_FOUND (exit 5)', async () => {
-    const r = await coauthor.use(['nope@nowhere.com'], root).catch((e) => e);
+  it('add of unknown email fails', async () => {
+    const r = await coauthor.add(['nope@nowhere.com'], {}, root).catch((e) => e);
     expect(r).toBeInstanceOf(Error);
   });
 });

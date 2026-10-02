@@ -1,6 +1,6 @@
 export const CO_AUTHOR_TRAILER = 'Co-authored-by:';
 
-/** A co-author entry (matches git-mob's `.git-coauthors` shape). */
+/** A co-author entry for trailer formatting. */
 export class Author {
   constructor(
     public readonly key: string,

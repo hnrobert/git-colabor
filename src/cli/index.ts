@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { Errors } from '../core/errors.js';
 import { failFromError, emit } from './json.js';
 import { parseCommandArgs, parseGlobals, type GlobalFlags } from './parse-args.js';
-import { renderAuthors, type AuthorJson } from './render.js';
+
 import * as coauthor from './coauthor.js';
 import * as identity from './identity.js';
 import type { JsonResult } from '../core/types.js';
@@ -28,11 +28,11 @@ function topHelp(): string {
     'git colabor — co-author + identity + SSH key management',
     '',
     'Usage:',
-    '  git colabor coauthor ls [filter]           (list identities as co-author candidates)',
-    '  git colabor coauthor use <email|id>...     (select co-authors by email or identity ID)',
-    '  git colabor coauthor solo',
-    '  git colabor coauthor print [-i]',
-    '  git colabor coauthor add "Name" <email>    (adds a key-less identity)',
+    '  git colabor coauthor add <email|id> [--always] [--global]',
+    '       default: next commit only · --always: this repo · --global: all repos',
+    '  git colabor coauthor rm <email|id>         (remove from all scopes)',
+    '  git colabor coauthor ls [filter]           (available + active co-authors)',
+    '  git colabor coauthor print                 (trailer blob for commit message)',
     '  git colabor coauthor suggest [filter]',
     '  git colabor identity ls',
     '  git colabor identity use <id> [--as-name <n> --as-email <e>]',
@@ -96,28 +96,27 @@ async function dispatchCoauthor(
   cwd: string,
 ) {
   switch (command) {
+    case 'add': {
+      const p = parseCommandArgs(tokens, { boolFlags: ['--always', '--global'] });
+      return coauthor.add(p.positionals, {
+        always: p.bools.has('--always'),
+        global: p.bools.has('--global'),
+      }, cwd);
+    }
+    case 'rm': {
+      const p = parseCommandArgs(tokens);
+      return coauthor.rm(p.positionals, cwd);
+    }
     case undefined:
     case 'ls': {
       const p = parseCommandArgs(tokens);
       return coauthor.ls(p.positionals, cwd);
     }
-    case 'use': {
-      const p = parseCommandArgs(tokens);
-      return coauthor.use(p.positionals, cwd);
-    }
-    case 'solo':
-      return coauthor.solo(cwd);
-    case 'print': {
-      const p = parseCommandArgs(tokens, { boolFlags: ['-i', '--initials'] });
-      return coauthor.print({ initials: p.bools.has('-i') || p.bools.has('--initials') }, cwd);
-    }
-    case 'add': {
-      const p = parseCommandArgs(tokens);
-      return coauthor.add(p.positionals, cwd);
-    }
+    case 'print':
+      return coauthor.print({ initials: false }, cwd);
     case 'suggest': {
       const p = parseCommandArgs(tokens);
-      return flags.json ? coauthor.suggest(p.positionals, cwd) : coauthor.suggestInteractive(p.positionals, cwd);
+      return coauthor.suggest(p.positionals, cwd);
     }
     default:
       throw Errors.usage(`unknown coauthor command "${command}"`);
@@ -138,18 +137,37 @@ function humanFor(r: JsonResult, subgroup: string, command?: string): string {
 
 function coauthorHuman(command: string | undefined, d: unknown): string {
   if (command === 'print') return String((d as { text?: string }).text ?? '');
+  if (command === 'add') {
+    const data = d as { added: { name: string; email: string }; mode: string };
+    const modeLabel = data.mode === 'global' ? 'all repos' : data.mode === 'always' ? 'this repo' : 'next commit';
+    return `Co-author ${data.added.name} <${data.added.email}> → ${modeLabel}`;
+  }
+  if (command === 'rm') {
+    const data = d as { removed: { name: string; email: string }; from: string[] };
+    return data.from.length
+      ? `Removed ${data.removed.name} from: ${data.from.join(', ')}`
+      : `${data.removed.name} was not active in any scope`;
+  }
   if (command === undefined || command === 'ls') {
-    return renderAuthors((d as AuthorJson[]) ?? []);
+    const data = d as { available: { name: string; email: string }[]; selected: { name: string; email: string; mode: string }[] };
+    const lines: string[] = [];
+    if (data.selected.length > 0) {
+      lines.push('Active co-authors:');
+      for (const s of data.selected) lines.push(`  ● ${s.name} <${s.email}> (${s.mode})`);
+    }
+    lines.push(`Available (${data.available.length}):`);
+    const selectedEmails = new Set(data.selected.map((s) => s.email.toLowerCase()));
+    for (const a of data.available) {
+      if (selectedEmails.has(a.email.toLowerCase())) continue;
+      lines.push(`  ○ ${a.name} <${a.email}>`);
+    }
+    return lines.join('\n');
   }
-  if (command === 'use') {
-    const sel = (d as { selected?: AuthorJson[] }).selected ?? [];
-    return sel.length ? `Co-authoring with:\n${renderAuthors(sel)}` : 'No co-authors selected.';
-  }
-  if (command === 'solo') return 'Cleared co-authors.';
-  if (command === 'add') return `${(d as { author: AuthorJson }).author.name} added to .git-coauthors`;
   if (command === 'suggest') {
-    const added = (d as { added?: AuthorJson[] }).added ?? [];
-    return added.length ? `Added ${added.length} co-author(s):\n${renderAuthors(added)}` : 'No co-authors added.';
+    const candidates = (d as { candidates?: { name: string; email: string }[] }).candidates ?? [];
+    return candidates.length
+      ? `Found ${candidates.length} contributor(s):\n${candidates.map((a) => `  ${a.name} <${a.email}>`).join('\n')}`
+      : 'No contributors found.';
   }
   return JSON.stringify(d, null, 2);
 }

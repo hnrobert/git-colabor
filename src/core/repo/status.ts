@@ -1,7 +1,8 @@
 import { getConfig } from '../git/config.js';
 import { insideWorkTree } from '../git/rev.js';
 import { getSelected } from '../coauthors/state.js';
-import { listAuthors } from '../authors/store.js';
+import { listIdentities } from '../identity/map.js';
+import { genKey } from '../authors/types.js';
 import { readState } from './state.js';
 import type { HeldBy } from '../types.js';
 
@@ -36,15 +37,17 @@ export async function repoStatus(cwd?: string): Promise<RepoStatus> {
       available: [],
     };
   }
-  const [managed, managedBy, state, selected] = await Promise.all([
+  const [managed, managedBy, state, selected, identityMap] = await Promise.all([
     getConfig('colabor.managed', 'local', cwd),
     getConfig('colabor.managed-by', 'local', cwd),
     readState(cwd),
     getSelected(cwd),
+    listIdentities(),
   ]);
-  const allAuthors = await listAuthors(undefined, cwd);
   const selectedEmails = new Set(selected.map((a) => a.email));
-  const available = allAuthors.filter((a) => !selectedEmails.has(a.email)).map(toBrief);
+  const available = identityMap.identities
+    .filter((i) => !selectedEmails.has(i.email))
+    .map((i) => ({ key: genKey(i.name, i.email), name: i.name, email: i.email }));
   return {
     inRepo: true,
     repo: cwd as string,
