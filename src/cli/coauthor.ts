@@ -1,16 +1,11 @@
 import { createInterface } from 'node:readline/promises';
-import { Author } from '../core/authors/types.js';
-import {
-  addCoAuthor,
-  getAuthor,
-  listAuthors,
-  validateEmail,
-} from '../core/authors/store.js';
+import { Author, genKey } from '../core/authors/types.js';
+import { addIdentity, listIdentities } from '../core/identity/map.js';
 import { clearSelected, getSelected, setSelected } from '../core/coauthors/state.js';
 import { printTrailers } from '../core/message/formatter.js';
 import { repoAuthors } from '../core/git/shortlog.js';
 import { insideWorkTree } from '../core/git/rev.js';
-import { AppError, Errors } from '../core/errors.js';
+import { Errors } from '../core/errors.js';
 import type { JsonResult } from '../core/types.js';
 import { authorToJson, type AuthorJson } from './render.js';
 import { ok } from './json.js';
@@ -28,13 +23,33 @@ async function prompt(question: string): Promise<string> {
   }
 }
 
-/** `git colabor coauthor ls [filter]` */
-export async function ls(args: string[], cwd?: string): Promise<JsonResult> {
-  const authors = await listAuthors(args[0], cwd);
-  return ok(authors.map(authorToJson));
+/** All identities as potential co-author Authors. */
+async function identityAuthors(): Promise<{ id: string; author: Author }[]> {
+  const { identities } = await listIdentities();
+  return identities.map((i) => ({
+    id: i.id,
+    author: new Author(genKey(i.name, i.email), i.name, i.email),
+  }));
 }
 
-/** `git colabor coauthor use [initials...]` — with no args, print current selection. */
+/**
+ * `git colabor coauthor ls [filter]` — lists identities as co-author candidates
+ * (unified with the identity system; .git-coauthors is no longer the source).
+ */
+export async function ls(args: string[]): Promise<JsonResult> {
+  const all = await identityAuthors();
+  const filter = args[0]?.toLowerCase();
+  const out = filter
+    ? all.filter(({ author }) =>
+        author.name.toLowerCase().includes(filter) || author.email.toLowerCase().includes(filter))
+    : all;
+  return ok(out.map(({ id, author }) => ({ id, key: author.key, name: author.name, email: author.email })));
+}
+
+/**
+ * `git colabor coauthor use <email|id> [...]` — select co-authors by email or
+ * identity ID (no args: print current selection).
+ */
 export async function use(args: string[], cwd?: string): Promise<JsonResult> {
   await requireRepo(cwd);
   if (args.length === 0) {
@@ -44,12 +59,15 @@ export async function use(args: string[], cwd?: string): Promise<JsonResult> {
       ? ok(data, [{ code: 'empty', message: 'no co-authors selected' }])
       : ok(data);
   }
-  const all = await listAuthors(undefined, cwd);
+  const all = await identityAuthors();
   const selected: Author[] = [];
-  for (const k of args) {
-    const found = all.find((a) => a.key === k);
-    if (!found) throw Errors.authorNotFound(k);
-    selected.push(found);
+  for (const arg of args) {
+    const lower = arg.toLowerCase();
+    const found = all.find(({ id, author }) => author.email.toLowerCase() === lower || id === arg);
+    if (!found) {
+      throw Errors.authorNotFound(arg);
+    }
+    selected.push(found.author);
   }
   await setSelected(selected, cwd);
   return ok({ selected: selected.map(authorToJson) });
@@ -69,19 +87,21 @@ export async function print(opts: { initials: boolean }, cwd?: string): Promise<
   return ok({ text });
 }
 
-/** `git colabor coauthor add <initials> "Name" <email>` */
-export async function add(args: string[], cwd?: string): Promise<JsonResult> {
-  const [key, name, email] = args;
-  if (!key || !name || !email) {
-    throw Errors.usage('git colabor coauthor add <initials> "Name" <email>');
+/**
+ * `git colabor coauthor add "Name" <email>` — adds a key-less identity
+ * (same as `identity add --name <n> --email <e>`). The old `.git-coauthors`
+ * catalogue is no longer written.
+ */
+export async function add(args: string[]): Promise<JsonResult> {
+  const [name, email] = args;
+  if (!name || !email) {
+    throw Errors.usage('git colabor coauthor add "Name" <email>  (or use identity add)');
   }
-  if (!validateEmail(email)) throw Errors.invalidEmail(email);
-  const author = new Author(key, name, email);
-  await addCoAuthor(author, cwd);
-  return ok({ author: authorToJson(author) });
+  const identity = await addIdentity({ name, email });
+  return ok({ identity: { id: identity.id, name, email } });
 }
 
-/** `git colabor coauthor suggest [filter]` (JSON: return candidates). */
+/** `git colabor coauthor suggest [filter]` (JSON: return candidates from repo history). */
 export async function suggest(args: string[], cwd?: string): Promise<JsonResult> {
   await requireRepo(cwd);
   const candidates = await repoAuthors(args[0], cwd);
@@ -93,7 +113,10 @@ export async function suggest(args: string[], cwd?: string): Promise<JsonResult>
   return ok({ candidates: candidates.map(authorToJson), added: [] });
 }
 
-/** Human-mode interactive suggest: list numbered contributors, read indices, add. */
+/**
+ * Human-mode interactive suggest: list numbered committers, read indices,
+ * add each as a key-less identity.
+ */
 export async function suggestInteractive(args: string[], cwd?: string): Promise<JsonResult> {
   await requireRepo(cwd);
   const candidates = await repoAuthors(args[0], cwd);
@@ -105,26 +128,14 @@ export async function suggestInteractive(args: string[], cwd?: string): Promise<
     candidates.map((a, i) => `[${i}] ${a.name} <${a.email}>`).join('\n') + '\n',
   );
   const answer = await prompt('Add which? (comma-separated numbers, blank to skip) ');
-  const added: Author[] = [];
+  const added: { id: string; name: string; email: string }[] = [];
   for (const part of answer.split(',')) {
     const idx = Number(part.trim());
     if (Number.isInteger(idx) && idx >= 0 && idx < candidates.length) {
-      added.push(candidates[idx]);
+      const c = candidates[idx];
+      const identity = await addIdentity({ name: c.name, email: c.email, imported: true, scope: 'project' });
+      added.push({ id: identity.id, name: c.name, email: c.email });
     }
   }
-  for (const a of added) {
-    try {
-      await addCoAuthor(a, cwd);
-    } catch (e) {
-      // duplicate key is fine — already in catalogue
-      if (!(e instanceof AppError && e.code === 'DUPLICATE_KEY')) throw e;
-    }
-  }
-  return ok({ added: added.map(authorToJson) });
-}
-
-/** Resolve a single author by key (used by tests / future commands). */
-export async function show(args: string[], cwd?: string): Promise<JsonResult> {
-  const a = await getAuthor(args[0] ?? '', cwd);
-  return ok(authorToJson(a));
+  return ok({ added });
 }

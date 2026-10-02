@@ -45,7 +45,7 @@ const ADD_SPEC = {
 };
 const AUDIT_SPEC = { valueFlags: ['--repo', '--since', '--tail'] };
 const APPLY_SPEC = { valueFlags: ['--name', '--email', '--ssh-command', '--source'] };
-const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--passphrase-command'], boolFlags: ['--no-key'] };
+const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--passphrase-command', '--scope'], boolFlags: ['--no-key'] };
 const SIGN_SPEC = { valueFlags: [], boolFlags: ['--off'] };
 
 function identityToJson(i: Identity, defaultId?: string) {
@@ -294,6 +294,13 @@ async function setIdentity(p: CmdParsed): Promise<JsonResult> {
     }
   }
   if (p.values['--passphrase-command']) patch.passphraseCommand = p.values['--passphrase-command'];
+  if (p.values['--scope']) {
+    const s = p.values['--scope'];
+    if (s !== 'user' && s !== 'machine' && s !== 'project') {
+      throw Errors.usage(`--scope must be user|machine|project, got "${s}"`);
+    }
+    patch.scope = s;
+  }
   if (Object.keys(patch).length === 0) {
     throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key / --passphrase-command');
   }
