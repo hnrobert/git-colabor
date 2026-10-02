@@ -24,8 +24,19 @@ function runInherit(cmdArgs: string[], env?: NodeJS.ProcessEnv, stdinNull = fals
     const child = spawn(cmd, args, {
       env: env ?? process.env,
       stdio: [stdinNull ? 'ignore' : 'inherit', 'inherit', 'pipe'],
+      detached: false, // keep setsid children in our process group so the kill timer can reach them
     });
-    const killTimer = setTimeout(() => child.kill('SIGKILL'), 10_000); // never hang on a stuck child
+    const killTimer = setTimeout(() => {
+      child.kill('SIGKILL');
+      // setsid creates a NEW session — kill the whole group to catch orphans
+      if (child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          // group already gone
+        }
+      }
+    }, 10_000);
     child.on('error', () => {
       clearTimeout(killTimer);
       resolve(127);
