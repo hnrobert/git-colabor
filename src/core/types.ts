@@ -14,8 +14,6 @@ export type Identity = {
   sshKeyFingerprint?: string;
   /** referenced key source path (absolute); never a copy */
   sshKeyPath?: string;
-  /** shell command whose stdout is the passphrase (escape hatch for pure-CLI) */
-  passphraseCommand?: string;
   /** informational, e.g. "github.com" */
   host?: string;
   /** true when auto-imported from repo history (`identity import`) */

@@ -1,17 +1,16 @@
 import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 import { Errors } from '../errors.js';
-import { askSocket, runPassphraseCommand } from './askpass-protocol.js';
+import { askSocket } from './askpass-protocol.js';
 
 export type ResolveOpts = {
   socketPath?: string;
   token?: string;
-  passphraseCommand?: string;
   interactive?: boolean;
 };
 
 /**
- * Resolve a key passphrase. Order: extension socket bridge → passphraseCommand → tty prompt.
+ * Resolve a key passphrase. Order: extension session socket bridge → tty prompt.
  * Never logs the passphrase. Throws SecretUnavailable if nothing can provide it.
  */
 export async function resolvePassphrase(fingerprint: string, opts: ResolveOpts = {}): Promise<string> {
@@ -19,16 +18,12 @@ export async function resolvePassphrase(fingerprint: string, opts: ResolveOpts =
     const got = await askSocket(opts.socketPath, opts.token, fingerprint);
     if (got) return got;
   }
-  if (opts.passphraseCommand) {
-    const got = await runPassphraseCommand(opts.passphraseCommand);
-    if (got) return got;
-  }
   if (opts.interactive && process.stdin.isTTY) {
     return await promptPassphraseTty(`Passphrase for ${fingerprint}: `);
   }
   throw Errors.secretUnavailable('no passphrase source available', [
-    'use --passphrase-command <cmd>',
     'run within the VS Code extension (provides the askpass bridge)',
+    'load the key into ssh-agent first (ssh-add)',
     'import a passphraseless key',
   ]);
 }

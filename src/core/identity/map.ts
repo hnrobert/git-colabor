@@ -13,9 +13,14 @@ export async function readMap(): Promise<IdentityMap> {
   try {
     const txt = await readFile(mapPath(), 'utf8');
     const parsed = JSON.parse(txt) as Partial<IdentityMap>;
+    const identities = { ...parsed.identities };
+    // strip the removed passphraseCommand field so stale entries vanish on next write
+    for (const id of Object.keys(identities)) {
+      delete (identities[id] as { passphraseCommand?: string }).passphraseCommand;
+    }
     return {
       schemaVersion: 1,
-      identities: parsed.identities ?? {},
+      identities,
       defaultIdentity: parsed.defaultIdentity,
       hidden: parsed.hidden,
     };
@@ -52,7 +57,7 @@ export async function addIdentity(input: NewIdentity): Promise<Identity> {
 /** Patch editable fields of an identity (name/email/key reference). */
 export async function updateIdentity(
   id: string,
-  patch: Partial<Pick<Identity, 'name' | 'email' | 'sshKeyPath' | 'sshKeyFingerprint' | 'passphraseCommand' | 'sshKeyEncrypted' | 'disabled' | 'scope' | 'remoteKeys'>>,
+  patch: Partial<Pick<Identity, 'name' | 'email' | 'sshKeyPath' | 'sshKeyFingerprint' | 'sshKeyEncrypted' | 'disabled' | 'scope' | 'remoteKeys'>>,
 ): Promise<Identity> {
   const map = await readMap();
   const identity = map.identities[id];
@@ -62,7 +67,6 @@ export async function updateIdentity(
   if (patch.sshKeyPath === undefined && Object.keys(patch).includes('sshKeyPath')) {
     delete next.sshKeyPath;
     delete next.sshKeyFingerprint;
-    delete next.passphraseCommand;
   }
   map.identities[id] = next;
   await writeMap(map);

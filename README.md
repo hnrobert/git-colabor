@@ -12,9 +12,9 @@ You share a machine — a lab workstation, a pair-programming box, a Remote-SSH 
 
 ## Features
 
-- **Identities** — named `{ name, email, SSH key }` profiles; `identity use` writes `user.name`, `user.email`, and `core.sshCommand` for the current repo, loads the key into `ssh-agent`, and snapshots prior config so `revert` can restore it.
-- **Co-authors** — select people from a `.git-coauthors` catalogue (git-mob-compatible JSON); trailers are seeded into the commit template and stay in sync.
-- **Safe key handling** — private keys are referenced in place (never copied or modified), passphrases never appear on `argv` / `ps` (SSH_ASKPASS bridge, optional `--passphrase-command`), a broken key reference degrades to a key-less apply.
+- **Identities** — named `{ name, email, SSH key }` profiles; `identity use` writes `user.name`, `user.email`, and `core.sshCommand` for the current repo and snapshots prior config so `revert` can restore it. Keys are never auto-loaded into ssh-agent — that's the explicit `identity agent <id>`.
+- **Co-authors** — pick people from your identities; trailers are seeded into the commit template and stay in sync.
+- **Safe key handling** — private keys are referenced in place (never copied or modified), passphrases never appear on `argv` / `ps` (SSH_ASKPASS bridge), a broken key reference degrades to a key-less apply.
 - **Coordination** — advisory `heldBy` session locking warns when a second session (another terminal, another VS Code window) is about to override the repo identity; nothing is ever silently clobbered.
 - **Audit trail** — every identity action is appended to a local JSONL audit log (fingerprint only — never key bodies or passphrases).
 - **Machine-friendly** — every command supports `--json` with a stable envelope and documented exit codes.
@@ -74,11 +74,12 @@ Selecting co-authors rewrites the commit template (`commit.template` / `~/.gitme
 | Command | Effect |
 | --- | --- |
 | `identity ls` | List identities; `*` marks the default; shows key fingerprint. |
-| `identity use <id>` | Apply identity to the current repo (config + agent + state). Flags: `--source cli\|ext`, `--as-name`, `--as-email` (override committer fields), `--no-override` (refuse to take over a repo held by another session → exit 6). |
-| `identity add` | `--name`, `--email` (required); `--key <path>` (import), `--passphrase-command <cmd>`, `--host`, `--default`. |
+| `identity use <id>` | Apply identity to the current repo (config + state; reports whether the key is in ssh-agent, never loads it). Flags: `--source cli\|ext`, `--as-name`, `--as-email` (override committer fields), `--no-override` (refuse to take over a repo held by another session → exit 6). With an encrypted key neither in the agent nor served by the extension bridge, prints an `agent-reminder` pointing at `ssh-add <key>`. |
+| `identity agent <id>` | The only path that loads a key into ssh-agent. `--remove` unloads (`ssh-add -d`); `--verify` proves the extension-session passphrase is correct without any agent write (`ssh-keygen -y` under askpass). |
+| `identity add` | `--name`, `--email` (required); `--key <path>` (import), `--host`, `--default`. |
 | `identity rm <id>` | Remove from the identity map (logs out first, best-effort; imported identities are also hidden from future auto-imports). |
 | `identity import` | Add every distinct **committer** from the repo history as a key-less identity (idempotent, skips hidden emails; driven automatically by the extension on repo open). |
-| `identity set <id>` | Edit in place: `--name <n>`, `--email <e>`, `--key <path>` (re-reference), `--no-key` (clear), `--passphrase-command <cmd>`. |
+| `identity set <id>` | Edit in place: `--name <n>`, `--email <e>`, `--key <path>` (re-reference), `--no-key` (clear), `--scope user\|machine\|project`. |
 | `identity sign <id> [--off]` | Opt-in SSH commit signing with the identity's key — writes `commit.gpgsign=true`, `gpg.format=ssh`, `user.signingKey`; `--off` clears them. While on, `identity use` re-binds the signing key to the newly applied identity. |
 | `identity logout [id]` | Remove key from `ssh-agent` — the key file itself is never touched; repo stays configured (use `revert` for that). |
 | `identity revert` | Restore the repo's pre-tool `user.*` / `core.sshCommand` / `commit.template` from the first-touch backup, clear markers. |
@@ -140,7 +141,7 @@ Git config keys **written locally** per repo: `user.name`, `user.email`, `core.s
 ## Security notes
 
 - Private keys are **referenced in place** — the tool never copies, modifies, or deletes them; your file layout and permissions are entirely yours. Importing an unencrypted key raises a warning; a key file that later disappears degrades the identity to key-less with a `key-missing` warning.
-- Passphrases are resolved via, in order: the extension's askpass socket bridge → `passphrase-command` → interactive tty prompt. They never appear on `argv`, in `ps`, or in any log (redaction is unit- and e2e-tested).
+- Passphrases are resolved via, in order: the extension's askpass socket bridge → interactive tty prompt. They never appear on `argv`, in `ps`, or in any log (redaction is unit- and e2e-tested), and are never written to disk. Pure-CLI runs (no extension session) rely on ssh-agent or per-operation tty prompts.
 - The audit log records fingerprints and session metadata only.
 
 Full threat model: [docs/SECURITY.md](../docs/SECURITY.md) in the extension repo.

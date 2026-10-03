@@ -6,9 +6,10 @@ import { topLevel } from '../git/rev.js';
 import { captureBackupIfFirstTouch, readState, writeState } from '../repo/state.js';
 import { detectConflict, nowHeldBy, cliSessionId, type ConflictInfo } from '../repo/coordination.js';
 import { appendAudit } from '../logging/audit.js';
-import { loadKey } from './agent.js';
+import { keyInAgent } from './agent.js';
 import { getIdentity } from './map.js';
 import { keyUsable } from './keys.js';
+import { discoverSessionBridge } from '../secrets/session-bridge.js';
 import { AppError } from '../errors.js';
 import type { Identity, Source } from '../types.js';
 
@@ -29,7 +30,10 @@ export type ApplyResult = {
   email: string;
   sshCommand?: string;
   conflict: ConflictInfo | null;
-  keyLoaded?: { loaded: boolean; via: string; message?: string };
+  /** is the identity's key fingerprint currently held by ssh-agent (undefined when no key) */
+  agent?: { inAgent: boolean };
+  /** the askpass prefix was baked into core.sshCommand (a bridge session exists) */
+  bridgeUsed?: boolean;
   /** the referenced key file was missing/unreadable — applied without a key */
   keyMissing?: boolean;
 };
@@ -44,7 +48,8 @@ async function safeTopLevel(cwd?: string): Promise<string | undefined> {
 
 /**
  * The single writer: write repo-local user.name / user.email / core.sshCommand, set markers,
- * capture backup on first touch, record heldBy, best-effort load the key into ssh-agent, audit.
+ * capture backup on first touch, record heldBy, report agent presence, audit. Keys are NEVER
+ * auto-loaded into ssh-agent here — loading is an explicit manual action (`identity agent`).
  */
 export async function applyResolvedIdentity(args: {
   name: string;
@@ -87,19 +92,11 @@ export async function applyResolvedIdentity(args: {
   }
   await writeState(state, opts.cwd);
 
-  let keyLoaded: ApplyResult['keyLoaded'];
-  if (identity?.sshKeyPath && identity.sshKeyFingerprint) {
-    keyLoaded = await loadKey({
-      keyPath: identity.sshKeyPath,
-      fingerprint: identity.sshKeyFingerprint,
-      // ssh/ssh-add/ssh-keygen execve() SSH_ASKPASS — the .cjs bundle is not
-      // executable, so route through the generated shell wrapper
-      askpassScriptPath: opts.askpassScriptPath ? await ensureAskpassWrapper(opts.askpassScriptPath) : undefined,
-      socketPath: opts.socketPath,
-      token: opts.token,
-      passphraseCommand: identity.passphraseCommand,
-      useAppleKeychain: true,
-    });
+  // report-only: is the key already in the agent? (never auto-load — loading
+  // is the explicit `identity agent` command)
+  let agent: ApplyResult['agent'];
+  if (identity?.sshKeyFingerprint) {
+    agent = { inAgent: await keyInAgent(identity.sshKeyFingerprint) };
   }
 
   await appendAudit({
@@ -113,7 +110,7 @@ export async function applyResolvedIdentity(args: {
     message: conflict ? `overrode ${conflict.heldBy.session}` : undefined,
   });
 
-  return { name, email, sshCommand, conflict, keyLoaded };
+  return { name, email, sshCommand, conflict, agent };
 }
 
 /**
@@ -153,6 +150,7 @@ export async function applyIdentity(
 ): Promise<{ identity: Identity; result: ApplyResult }> {
   const identity = await getIdentity(id);
   let sshCommand: string | undefined;
+  let bridgeUsed = false;
   let keyMissing = false;
   if (identity.sshKeyPath) {
     // Reference mode: the key lives wherever the user put it. A broken
@@ -160,9 +158,17 @@ export async function applyIdentity(
     // name/email still switch, no core.sshCommand is written, agent load skipped.
     if (await keyUsable(identity.sshKeyPath)) {
       const bare = `ssh -i ${identity.sshKeyPath} -o IdentitiesOnly=yes`;
-      if (opts.askpassScriptPath) {
+      // Bake the SSH_ASKPASS prefix only when the extension bridge is actually
+      // reachable (env socket or a live session file). SSH_ASKPASS_REQUIRE=force
+      // kills ssh's tty fallback, so baking it with no bridge behind would turn
+      // every push into "no passphrase available" for pure-CLI users — they get
+      // the bare command instead: ssh-agent if the key is loaded, else a per-
+      // operation passphrase prompt on the tty.
+      const bridge = (opts.socketPath && opts.token) || discoverSessionBridge();
+      if (opts.askpassScriptPath && bridge) {
         const wrapper = await ensureAskpassWrapper(opts.askpassScriptPath);
         sshCommand = `SSH_ASKPASS="${wrapper}" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 ${bare}`;
+        bridgeUsed = true;
       } else {
         sshCommand = bare;
       }
@@ -178,5 +184,6 @@ export async function applyIdentity(
     opts,
   });
   result.keyMissing = keyMissing;
+  result.bridgeUsed = bridgeUsed;
   return { identity, result };
 }

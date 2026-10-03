@@ -17,12 +17,12 @@ import {
 } from '../core/identity/map.js';
 import { historyCommitters } from '../core/git/committers.js';
 import { importKey } from '../core/identity/keys.js';
-import { applyIdentity, applyResolvedIdentity } from '../core/identity/apply.js';
+import { applyIdentity, applyResolvedIdentity, ensureAskpassWrapper } from '../core/identity/apply.js';
 import { revertRepo } from '../core/identity/revert.js';
 import { setCommitSigning } from '../core/identity/sign.js';
 import { logoutIdentity } from '../core/identity/logout.js';
 import { appendAudit, readAudit } from '../core/logging/audit.js';
-import { listAgent } from '../core/identity/agent.js';
+import { agentFingerprints, keyInAgent, listAgent, loadKey, removeKey, verifyKey } from '../core/identity/agent.js';
 import { getConfig } from '../core/git/config.js';
 import { insideWorkTree, topLevel } from '../core/git/rev.js';
 import { readState, writeState } from '../core/repo/state.js';
@@ -40,15 +40,16 @@ export type IdCtx = {
 
 const USE_SPEC = { valueFlags: ['--source', '--as-name', '--as-email'], boolFlags: ['--no-override'] };
 const ADD_SPEC = {
-  valueFlags: ['--name', '--email', '--key', '--passphrase-command', '--host', '--source'],
+  valueFlags: ['--name', '--email', '--key', '--host', '--source'],
   boolFlags: ['--default', '--no-encrypt'],
 };
 const AUDIT_SPEC = { valueFlags: ['--repo', '--since', '--tail'] };
 const APPLY_SPEC = { valueFlags: ['--name', '--email', '--ssh-command', '--source'] };
-const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--passphrase-command', '--scope'], boolFlags: ['--no-key'] };
+const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--scope'], boolFlags: ['--no-key'] };
 const SIGN_SPEC = { valueFlags: [], boolFlags: ['--off'] };
+const AGENT_SPEC = { valueFlags: [], boolFlags: ['--remove', '--verify'] };
 
-function identityToJson(i: Identity, defaultId?: string) {
+function identityToJson(i: Identity, defaultId?: string, agentPrints?: Set<string>) {
   return {
     id: i.id,
     name: i.name,
@@ -59,6 +60,8 @@ function identityToJson(i: Identity, defaultId?: string) {
     hasKey: !!i.sshKeyPath && existsSync(i.sshKeyPath),
     sshKeyPath: i.sshKeyPath,
     keyEncrypted: !!i.sshKeyEncrypted,
+    /** key fingerprint currently held by ssh-agent (live check, one listAgent per call) */
+    inAgent: !!i.sshKeyFingerprint && (agentPrints?.has(i.sshKeyFingerprint) ?? false),
     imported: !!i.imported,
     disabled: !!i.disabled,
     scope: i.scope ?? (i.imported ? 'project' : 'machine'),
@@ -104,6 +107,8 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return rm(parseCommandArgs(tokens), ctx);
     case 'logout':
       return logout(parseCommandArgs(tokens), ctx);
+    case 'agent':
+      return agentKey(parseCommandArgs(tokens, AGENT_SPEC), ctx);
     case 'audit':
       return audit(parseCommandArgs(tokens, AUDIT_SPEC));
     case 'doctor':
@@ -121,7 +126,77 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
 
 async function ls(): Promise<JsonResult> {
   const { identities, defaultIdentity } = await listIdentities();
-  return ok({ identities: identities.map((i) => identityToJson(i, defaultIdentity)), defaultIdentity });
+  const prints = await agentFingerprints();
+  return ok({ identities: identities.map((i) => identityToJson(i, defaultIdentity, prints)), defaultIdentity });
+}
+
+/**
+ * The ONLY path that puts a key into ssh-agent (auto-load at use time was
+ * removed): `identity agent <id>` loads it, `--remove` takes it out, and
+ * `--verify` proves the session passphrase is correct without loading.
+ */
+async function agentKey(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
+  const id = p.positionals[0];
+  if (!id) throw Errors.usage('git colabor identity agent <id> [--remove | --verify]');
+  const identity = await getIdentity(id);
+  if (!identity.sshKeyPath || !identity.sshKeyFingerprint) {
+    throw Errors.usage(`identity "${id}" has no SSH key`);
+  }
+  const remove = p.bools.has('--remove');
+  const verify = p.bools.has('--verify');
+  if (remove && verify) throw Errors.usage('--remove and --verify are mutually exclusive');
+
+  if (remove) {
+    const removed = await removeKey(identity.sshKeyPath);
+    await appendAudit({
+      action: 'key.remove',
+      source: process.env.GIT_COLABOR_SOURCE === 'ext' ? 'ext' : 'cli',
+      identity: id,
+      identityName: identity.name,
+      fingerprint: identity.sshKeyFingerprint,
+    });
+    return ok({ removed, inAgent: await keyInAgent(identity.sshKeyFingerprint) }, removed ? [] : [
+      { code: 'not-in-agent', message: 'key was not loaded in ssh-agent' },
+    ]);
+  }
+
+  const askpassScriptPath = ctx.askpassScriptPath ? await ensureAskpassWrapper(ctx.askpassScriptPath) : undefined;
+  if (verify) {
+    // session-passphrase check without any agent write (ssh-keygen -y under askpass)
+    const verified = await verifyKey({
+      keyPath: identity.sshKeyPath,
+      fingerprint: identity.sshKeyFingerprint,
+      askpassScriptPath,
+      socketPath: ctx.socketPath,
+      token: ctx.token,
+    });
+    return ok({ verified, inAgent: await keyInAgent(identity.sshKeyFingerprint) });
+  }
+
+  const loaded = await loadKey({
+    keyPath: identity.sshKeyPath,
+    fingerprint: identity.sshKeyFingerprint,
+    askpassScriptPath,
+    socketPath: ctx.socketPath,
+    token: ctx.token,
+    useAppleKeychain: true,
+  });
+  if (loaded.loaded) {
+    await appendAudit({
+      action: 'key.load',
+      source: process.env.GIT_COLABOR_SOURCE === 'ext' ? 'ext' : 'cli',
+      identity: id,
+      identityName: identity.name,
+      fingerprint: identity.sshKeyFingerprint,
+      message: `via ${loaded.via}`,
+    });
+  }
+  return ok(
+    // inAgent is a live re-check: keygen-verify (agent-less host) reports
+    // loaded=true even though no agent holds the key
+    { loaded: loaded.loaded, via: loaded.via, inAgent: await keyInAgent(identity.sshKeyFingerprint), message: loaded.message },
+    loaded.loaded ? [] : [{ code: 'key-not-loaded', message: loaded.message ?? `via ${loaded.via}` }],
+  );
 }
 
 async function use(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
@@ -148,14 +223,19 @@ async function use(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
       message: `key file missing or unreadable: ${identity.sshKeyPath} — applied without a key (no core.sshCommand)`,
     });
   }
-  if (result.keyLoaded && !result.keyLoaded.loaded) {
-    warnings.push({ code: 'key-not-loaded', message: `key not loaded into agent: ${result.keyLoaded.message ?? result.keyLoaded.via}` });
+  // pure-CLI with an encrypted key that is neither in the agent nor served by
+  // the extension bridge → every push will prompt on the tty; point at ssh-add
+  if (identity.sshKeyEncrypted && result.agent && !result.agent.inAgent && !result.bridgeUsed) {
+    warnings.push({
+      code: 'agent-reminder',
+      message: `key not in ssh-agent — run \`ssh-add ${identity.sshKeyPath}\` to cache it, or each push will prompt for the passphrase`,
+    });
   }
   return ok(
     {
       identity: identityToJson(identity),
       applied: { userName: result.name, userEmail: result.email, sshCommand: result.sshCommand ?? null },
-      keyLoaded: result.keyLoaded ?? null,
+      agent: result.agent ?? null,
       conflict: result.conflict,
     },
     warnings,
@@ -166,7 +246,7 @@ async function add(p: CmdParsed): Promise<JsonResult> {
   const name = p.values['--name'];
   const email = p.values['--email'];
   if (!name || !email) {
-    throw Errors.usage('git colabor identity add --name <n> --email <e> [--key <path>] [--passphrase-command <cmd>] [--host <h>] [--default]');
+    throw Errors.usage('git colabor identity add --name <n> --email <e> [--key <path>] [--host <h>] [--default]');
   }
   const warnings: Warning[] = [];
   let sshKeyFingerprint: string | undefined;
@@ -181,12 +261,12 @@ async function add(p: CmdParsed): Promise<JsonResult> {
     sshKeyPath = imp.path;
     encrypted = imp.encrypted;
     sshKeyEncrypted = imp.encrypted;
-    if (imp.encrypted && !p.values['--passphrase-command']) {
+    if (imp.encrypted) {
       warnings.push({
         code: 'encrypted-key',
-        message: 'key is encrypted; provide --passphrase-command or run via the extension to load it at use time',
+        message: 'key is encrypted; it loads via the extension askpass session or an ssh-agent',
       });
-    } else if (!imp.encrypted) {
+    } else {
       warnings.push({
         code: 'unencrypted-key',
         message: 'key is UNENCRYPTED — anyone who reads the key file can use it. Consider encrypting it.',
@@ -199,7 +279,6 @@ async function add(p: CmdParsed): Promise<JsonResult> {
     sshKeyFingerprint,
     sshKeyPath,
     sshKeyEncrypted,
-    passphraseCommand: p.values['--passphrase-command'],
     host: p.values['--host'],
   });
   if (p.bools.has('--default')) await setDefault(identity.id);
@@ -286,14 +365,13 @@ async function setIdentity(p: CmdParsed): Promise<JsonResult> {
     const imp = await importKey(keySource);
     patch.sshKeyPath = imp.path;
     patch.sshKeyFingerprint = imp.fingerprint;
-    if (imp.encrypted && !p.values['--passphrase-command']) {
+    if (imp.encrypted) {
       warnings.push({
         code: 'encrypted-key',
-        message: 'key is encrypted; provide --passphrase-command or run via the extension to load it at use time',
+        message: 'key is encrypted; it loads via the extension askpass session or an ssh-agent',
       });
     }
   }
-  if (p.values['--passphrase-command']) patch.passphraseCommand = p.values['--passphrase-command'];
   if (p.values['--scope']) {
     const s = p.values['--scope'];
     if (s !== 'user' && s !== 'machine' && s !== 'project') {
@@ -302,7 +380,7 @@ async function setIdentity(p: CmdParsed): Promise<JsonResult> {
     patch.scope = s;
   }
   if (Object.keys(patch).length === 0) {
-    throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key / --passphrase-command');
+    throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key');
   }
   const next = await updateIdentity(id, patch);
   await appendAudit({
@@ -420,6 +498,7 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
   const active = rs.activeIdentityId ? identities.find((i) => i.id === rs.activeIdentityId) : undefined;
   const st = ctx.cwd ? await readState(ctx.cwd) : undefined;
   const signingKey = await getConfig('user.signingKey', 'local', ctx.cwd);
+  const prints = await agentFingerprints();
   return ok({
     repo: rs.repo,
     inRepo: rs.inRepo,
@@ -427,8 +506,8 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
     managedBy: rs.managedBy,
     heldBy: rs.heldBy,
     signing: { enabled: st?.signing === true, key: signingKey ?? null },
-    activeIdentity: active ? identityToJson(active, defaultIdentity) : null,
-    identities: identities.map((i) => ({ ...identityToJson(i, defaultIdentity), active: i.id === rs.activeIdentityId })),
+    activeIdentity: active ? identityToJson(active, defaultIdentity, prints) : null,
+    identities: identities.map((i) => ({ ...identityToJson(i, defaultIdentity, prints), active: i.id === rs.activeIdentityId })),
     selected: rs.selected,
     available: rs.available,
   });

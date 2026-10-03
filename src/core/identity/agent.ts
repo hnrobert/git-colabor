@@ -8,7 +8,6 @@ export type LoadKeyOpts = {
   askpassScriptPath?: string;
   socketPath?: string;
   token?: string;
-  passphraseCommand?: string;
   useAppleKeychain?: boolean;
 };
 
@@ -76,7 +75,7 @@ async function runBinQuiet(cmd: string, args: string[]): Promise<string> {
 
 /**
  * Load a key into ssh-agent. Tries, in order: plain load (covers passphraseless / already-loaded),
- * macOS keychain, SSH_ASKPASS bridge (socket/passphraseCommand), then interactive tty.
+ * macOS keychain, SSH_ASKPASS bridge (session socket), then interactive tty.
  * Never throws — returns a LoadResult so callers can warn without failing.
  */
 export async function loadKey(opts: LoadKeyOpts): Promise<LoadResult> {
@@ -93,7 +92,7 @@ export async function loadKey(opts: LoadKeyOpts): Promise<LoadResult> {
   }
 
   // 3. SSH_ASKPASS bridge (non-interactive; passphrase never on argv / never ps-visible)
-  const haveSource = (opts.socketPath && opts.token) || opts.passphraseCommand;
+  const haveSource = opts.socketPath && opts.token;
   if (opts.askpassScriptPath && haveSource) {
     const env: NodeJS.ProcessEnv = { ...process.env };
     env.SSH_ASKPASS = opts.askpassScriptPath;
@@ -101,7 +100,6 @@ export async function loadKey(opts: LoadKeyOpts): Promise<LoadResult> {
     env.DISPLAY = env.DISPLAY ?? ':0';
     if (opts.socketPath) env.GIT_COLABOR_ASKPASS_SOCK = opts.socketPath;
     if (opts.token) env.GIT_COLABOR_ASKPASS_TOKEN = opts.token;
-    if (opts.passphraseCommand) env.GIT_COLABOR_PASSPHRASE_COMMAND = opts.passphraseCommand;
     env.GIT_COLABOR_FINGERPRINT = opts.fingerprint;
     const useSetsid = process.platform !== 'win32' && hasBin('setsid');
     code = await runInherit(useSetsid ? ['setsid', 'ssh-add', opts.keyPath] : ['ssh-add', opts.keyPath], env, true);
@@ -115,23 +113,7 @@ export async function loadKey(opts: LoadKeyOpts): Promise<LoadResult> {
     // reliable WRONG-passphrase detector on agent-less hosts. Output is
     // captured (not inherited): ssh-keygen -y prints the PUBLIC KEY, which
     // would corrupt the CLI's own --json stdout.
-    const verifyQuiet = (args: string[]): Promise<number> =>
-      new Promise((resolve) => {
-        const child = spawn('ssh-keygen', args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-        const killTimer = setTimeout(() => child.kill('SIGKILL'), 10_000);
-        child.on('error', () => {
-          clearTimeout(killTimer);
-          resolve(127);
-        });
-        child.on('close', (c) => {
-          clearTimeout(killTimer);
-          resolve(c ?? 127);
-        });
-      });
-    const verify = await verifyQuiet(['-y', '-P', '', '-f', opts.keyPath]).then((c) =>
-      c === 0 ? Promise.resolve(0) : verifyQuiet(['-y', '-f', opts.keyPath]),
-    );
-    if (verify === 0) {
+    if (await verifyKey(opts)) {
       return {
         loaded: true,
         via: 'keygen-verify',
@@ -156,8 +138,63 @@ export async function listAgent(): Promise<string> {
   return runBinQuiet('ssh-add', ['-l']);
 }
 
+/** Fingerprints of every key currently held by ssh-agent (empty set when no agent). */
+export async function agentFingerprints(): Promise<Set<string>> {
+  const out = await listAgent();
+  const prints = new Set<string>();
+  for (const line of out.split('\n')) {
+    // "<bits> SHA256:xxx comment (card)" — the fingerprint is the second token
+    const tok = line.trim().split(/\s+/)[1];
+    if (tok?.startsWith('SHA256:')) prints.add(tok);
+  }
+  return prints;
+}
+
+/** Is this key's fingerprint currently loaded in ssh-agent? */
+export async function keyInAgent(fingerprint: string): Promise<boolean> {
+  return (await agentFingerprints()).has(fingerprint);
+}
+
 /** Remove a key from the agent (`ssh-add -d <key>`). */
 export async function removeKey(keyPath: string): Promise<boolean> {
   const code = await runInherit(['ssh-add', '-d', keyPath], undefined, true);
   return code === 0;
+}
+
+/** Quiet `ssh-keygen -y` under the askpass env — proves the session passphrase
+ * is correct WITHOUT loading the key into any agent. Output (the public key)
+ * is captured, never inherited. */
+export async function verifyKey(opts: {
+  keyPath: string;
+  fingerprint: string;
+  askpassScriptPath?: string;
+  socketPath?: string;
+  token?: string;
+}): Promise<boolean> {
+  if (!opts.askpassScriptPath || !(opts.socketPath && opts.token)) return false;
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  env.SSH_ASKPASS = opts.askpassScriptPath;
+  env.SSH_ASKPASS_REQUIRE = 'force';
+  env.DISPLAY = env.DISPLAY ?? ':0';
+  env.GIT_COLABOR_ASKPASS_SOCK = opts.socketPath;
+  env.GIT_COLABOR_ASKPASS_TOKEN = opts.token;
+  env.GIT_COLABOR_FINGERPRINT = opts.fingerprint;
+  const verifyQuiet = (args: string[]): Promise<number> =>
+    new Promise((resolve) => {
+      const child = spawn('ssh-keygen', args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const killTimer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+      child.on('error', () => {
+        clearTimeout(killTimer);
+        resolve(127);
+      });
+      child.on('close', (c) => {
+        clearTimeout(killTimer);
+        resolve(c ?? 127);
+      });
+    });
+  // `-P ''` reads the passphrase via askpass; fall back to the classic prompt form
+  const verify = await verifyQuiet(['-y', '-P', '', '-f', opts.keyPath]).then((c) =>
+    c === 0 ? Promise.resolve(0) : verifyQuiet(['-y', '-f', opts.keyPath]),
+  );
+  return verify === 0;
 }

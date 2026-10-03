@@ -14,10 +14,8 @@
  * Bundled separately to dist/askpass.cjs (see tsup.config.ts).
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { askSocket, runPassphraseCommand } from '../core/secrets/askpass-protocol.js';
-import { dataDir as colaborDir } from '../core/paths.js';
+import { askSocket } from '../core/secrets/askpass-protocol.js';
+import { discoverSessionBridge } from '../core/secrets/session-bridge.js';
 
 /** Fingerprint of a key file via `ssh-keygen -lf`, or undefined. */
 function fingerprintOf(path: string): string | undefined {
@@ -26,31 +24,10 @@ function fingerprintOf(path: string): string | undefined {
   return m?.[0];
 }
 
-/** Newest session-*.json in the data dir: {socketPath, token} for bridge discovery. */
-function discoverSession(): { socketPath: string; token: string } | undefined {
-  try {
-    const dir = colaborDir();
-    const sessions = readdirSync(dir)
-      .filter((f) => /^session-.*\.json$/.test(f))
-      .map((f) => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime);
-    if (sessions.length === 0) return undefined;
-    const parsed = JSON.parse(readFileSync(join(dir, sessions[0].f), 'utf8')) as {
-      socketPath?: string;
-      token?: string;
-    };
-    if (parsed.socketPath && parsed.token) return { socketPath: parsed.socketPath, token: parsed.token };
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 async function main(): Promise<void> {
   let socketPath = process.env.GIT_COLABOR_ASKPASS_SOCK;
   let token = process.env.GIT_COLABOR_ASKPASS_TOKEN;
   let fingerprint = process.env.GIT_COLABOR_FINGERPRINT;
-  const passphraseCommand = process.env.GIT_COLABOR_PASSPHRASE_COMMAND;
 
   // push-time bare mode: prompt is argv[1], e.g. Enter passphrase for key '/home/x/k':
   if (!fingerprint) {
@@ -58,7 +35,7 @@ async function main(): Promise<void> {
     const keyPath = prompt.match(/for key '([^']+)'/)?.[1];
     if (keyPath) fingerprint = fingerprintOf(keyPath);
     if (!socketPath || !token) {
-      const session = discoverSession();
+      const session = discoverSessionBridge();
       if (session) {
         socketPath ??= session.socketPath;
         token ??= session.token;
@@ -68,13 +45,6 @@ async function main(): Promise<void> {
 
   if (socketPath && token && fingerprint) {
     const got = await askSocket(socketPath, token, fingerprint);
-    if (got) {
-      process.stdout.write(got);
-      process.exit(0);
-    }
-  }
-  if (passphraseCommand) {
-    const got = await runPassphraseCommand(passphraseCommand);
     if (got) {
       process.stdout.write(got);
       process.exit(0);

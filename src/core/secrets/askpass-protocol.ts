@@ -1,5 +1,4 @@
 import { connect } from 'node:net';
-import { spawn } from 'node:child_process';
 
 const SOCKET_TIMEOUT_MS = 3000;
 
@@ -30,18 +29,5 @@ export function askSocket(socketPath: string, token: string, fingerprint: string
       sock.destroy();
       done(undefined);
     }, SOCKET_TIMEOUT_MS).unref?.();
-  });
-}
-
-/** Run a user-configured passphrase command (e.g. `op read …`, `pass show …`); stdout = passphrase. */
-export function runPassphraseCommand(command: string): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const child = spawn(command, { shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    child.stdout.on('data', (d) => {
-      out += d.toString('utf8');
-    });
-    child.on('error', () => resolve(undefined));
-    child.on('close', () => resolve(out.replace(/\r?\n$/, '') || undefined));
   });
 }

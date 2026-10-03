@@ -36,7 +36,8 @@ function topHelp(): string {
     '  git colabor coauthor suggest [filter]',
     '  git colabor identity ls',
     '  git colabor identity use <id> [--as-name <n> --as-email <e>]',
-    '  git colabor identity add --name <n> --email <e> [--key <path>] [--passphrase-command <cmd>]',
+    '  git colabor identity agent <id> [--remove | --verify]   (load/unload the key in ssh-agent)',
+    '  git colabor identity add --name <n> --email <e> [--key <path>]',
     '  git colabor identity import   (add all history committers as identities)',
     '  git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key',
     '  git colabor identity sign <id> [--off]   (opt-in SSH commit signing)',
@@ -178,6 +179,7 @@ type IdentityJson = {
   email: string;
   sshKeyFingerprint?: string;
   hasKey: boolean;
+  inAgent?: boolean;
   isDefault: boolean;
 };
 
@@ -188,19 +190,36 @@ function identityHuman(command: string | undefined, d: unknown): string {
     return identities
       .map(
         (i) =>
-          `${i.isDefault ? '* ' : '  '}${i.id}  ${i.name} <${i.email}>${i.hasKey ? `  [key ${i.sshKeyFingerprint ?? ''}]` : ''}`,
+          `${i.isDefault ? '* ' : '  '}${i.id}  ${i.name} <${i.email}>${i.hasKey ? `  [key ${i.sshKeyFingerprint ?? ''}${i.inAgent ? ' · in agent' : ''}]` : ''}`,
       )
       .join('\n');
   }
   if (command === 'use') {
-    const data = d as { identity: IdentityJson; applied: { userName: string; userEmail: string; sshCommand: string | null } };
+    const data = d as {
+      identity: IdentityJson;
+      applied: { userName: string; userEmail: string; sshCommand: string | null };
+      agent?: { inAgent: boolean } | null;
+    };
     const lines = [
       `Applied identity "${data.identity.name}" <${data.identity.email}>`,
       `  user.name       = ${data.applied.userName}`,
       `  user.email      = ${data.applied.userEmail}`,
     ];
     if (data.applied.sshCommand) lines.push(`  core.sshCommand = ${data.applied.sshCommand}`);
+    if (data.identity.hasKey) lines.push(`  key in ssh-agent = ${data.agent?.inAgent ? 'yes' : 'no (load: git colabor identity agent <id>)'}`);
     return lines.join('\n');
+  }
+  if (command === 'agent') {
+    const data = d as { loaded?: boolean; removed?: boolean; verified?: boolean; inAgent: boolean; message?: string };
+    if (data.removed !== undefined) {
+      return data.removed ? 'Key removed from ssh-agent.' : 'Key was not in ssh-agent.';
+    }
+    if (data.verified !== undefined) {
+      return data.verified ? 'Passphrase verified (no agent write).' : 'Passphrase rejected.';
+    }
+    return data.inAgent
+      ? 'Key loaded into ssh-agent.'
+      : `Key not loaded${data.message ? `: ${data.message}` : ''}`;
   }
   if (command === 'add') {
     const data = d as { identity: IdentityJson; encrypted: boolean | null };
