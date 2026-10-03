@@ -365,6 +365,7 @@ async function setIdentity(p: CmdParsed): Promise<JsonResult> {
     const imp = await importKey(keySource);
     patch.sshKeyPath = imp.path;
     patch.sshKeyFingerprint = imp.fingerprint;
+    patch.sshKeyEncrypted = imp.encrypted;
     if (imp.encrypted) {
       warnings.push({
         code: 'encrypted-key',

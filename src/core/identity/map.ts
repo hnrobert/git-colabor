@@ -67,6 +67,7 @@ export async function updateIdentity(
   if (patch.sshKeyPath === undefined && Object.keys(patch).includes('sshKeyPath')) {
     delete next.sshKeyPath;
     delete next.sshKeyFingerprint;
+    delete next.sshKeyEncrypted;
   }
   map.identities[id] = next;
   await writeMap(map);

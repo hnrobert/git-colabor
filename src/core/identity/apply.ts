@@ -7,10 +7,11 @@ import { captureBackupIfFirstTouch, readState, writeState } from '../repo/state.
 import { detectConflict, nowHeldBy, cliSessionId, type ConflictInfo } from '../repo/coordination.js';
 import { appendAudit } from '../logging/audit.js';
 import { keyInAgent } from './agent.js';
-import { getIdentity } from './map.js';
-import { keyUsable } from './keys.js';
+import { getIdentity, updateIdentity } from './map.js';
+import { importKey } from './keys.js';
 import { discoverSessionBridge } from '../secrets/session-bridge.js';
 import { AppError } from '../errors.js';
+import { existsSync } from 'node:fs';
 import type { Identity, Source } from '../types.js';
 
 export type ApplyOpts = {
@@ -84,11 +85,16 @@ export async function applyResolvedIdentity(args: {
   // Commit signing is OPT-IN per repo (right-click toggle → `identity sign`).
   // When enabled, re-bind the signing key to the newly applied identity's
   // usable key so signatures follow the committer; a key-less identity
-  // leaves the existing signing config untouched.
+  // leaves the existing signing config untouched. Agent-held keys sign via
+  // their public half (see signingKeyPath in sign.ts).
   if (state.signing === true && identity?.sshKeyPath && sshCommand) {
     await setConfig('commit.gpgsign', 'true', 'local', opts.cwd);
     await setConfig('gpg.format', 'ssh', 'local', opts.cwd);
-    await setConfig('user.signingKey', identity.sshKeyPath, 'local', opts.cwd);
+    const pub = `${identity.sshKeyPath}.pub`;
+    const viaAgent = !!identity.sshKeyFingerprint
+      && (await keyInAgent(identity.sshKeyFingerprint))
+      && existsSync(pub);
+    await setConfig('user.signingKey', viaAgent ? pub : identity.sshKeyPath, 'local', opts.cwd);
   }
   await writeState(state, opts.cwd);
 
@@ -148,7 +154,7 @@ export async function applyIdentity(
   id: string,
   opts: ApplyOpts & { asName?: string; asEmail?: string },
 ): Promise<{ identity: Identity; result: ApplyResult }> {
-  const identity = await getIdentity(id);
+  let identity = await getIdentity(id);
   let sshCommand: string | undefined;
   let bridgeUsed = false;
   let keyMissing = false;
@@ -156,7 +162,23 @@ export async function applyIdentity(
     // Reference mode: the key lives wherever the user put it. A broken
     // reference (moved/renamed/deleted) degrades to a key-less apply —
     // name/email still switch, no core.sshCommand is written, agent load skipped.
-    if (await keyUsable(identity.sshKeyPath)) {
+    let imp: Awaited<ReturnType<typeof importKey>> | undefined;
+    try {
+      imp = await importKey(identity.sshKeyPath); // parse = usability check
+    } catch {
+      imp = undefined;
+    }
+    if (imp) {
+      // Self-heal derived fields: the PATH is the source of truth, fingerprint
+      // and the encryption flag are derived from the file. Legacy rows created
+      // before sshKeyEncrypted existed — and keys attached via the old
+      // `identity set --key` (which skipped the flag) — carry a stale flag;
+      // a replaced key file also rotates the fingerprint. Heal on use so the
+      // passphrase prompt and the agent fingerprint match see reality.
+      if (imp.fingerprint !== identity.sshKeyFingerprint || imp.encrypted !== !!identity.sshKeyEncrypted) {
+        await updateIdentity(id, { sshKeyFingerprint: imp.fingerprint, sshKeyEncrypted: imp.encrypted });
+        identity = { ...identity, sshKeyFingerprint: imp.fingerprint, sshKeyEncrypted: imp.encrypted };
+      }
       const bare = `ssh -i ${identity.sshKeyPath} -o IdentitiesOnly=yes`;
       // Bake the SSH_ASKPASS prefix only when the extension bridge is actually
       // reachable (env socket or a live session file). SSH_ASKPASS_REQUIRE=force

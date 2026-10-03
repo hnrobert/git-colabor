@@ -3,6 +3,7 @@ import { topLevel, insideWorkTree } from '../git/rev.js';
 import { readState, writeState } from '../repo/state.js';
 import { getIdentity } from './map.js';
 import { keyUsable } from './keys.js';
+import { keyInAgent } from './agent.js';
 import { appendAudit } from '../logging/audit.js';
 import { Errors } from '../errors.js';
 import { dataDir } from '../paths.js';
@@ -37,6 +38,21 @@ export async function ensureSignWrapper(askpassScriptPath?: string): Promise<str
   await writeFile(wrapperPath, content, { mode: 0o700 });
   await chmod(wrapperPath, 0o700);
   return wrapperPath;
+}
+
+/**
+ * The `user.signingKey` value for an identity's key. `ssh-keygen -Y sign`
+ * with a PRIVATE key path loads the file (askpass prompt for encrypted keys —
+ * it never consults ssh-agent); with a PUBLIC key path it looks the key up in
+ * ssh-agent instead. So when the key is agent-held and the `.pub` sibling
+ * exists, sign via the public half — no passphrase involved.
+ */
+async function signingKeyPath(sshKeyPath: string, fingerprint?: string): Promise<string> {
+  if (fingerprint && (await keyInAgent(fingerprint))) {
+    const pub = `${sshKeyPath}.pub`;
+    if (existsSync(pub)) return pub;
+  }
+  return sshKeyPath;
 }
 
 /**
@@ -76,7 +92,7 @@ export async function setCommitSigning(opts: {
   await writeState(state, opts.cwd);
   await setConfig('commit.gpgsign', 'true', 'local', opts.cwd);
   await setConfig('gpg.format', 'ssh', 'local', opts.cwd);
-  await setConfig('user.signingKey', identity.sshKeyPath, 'local', opts.cwd);
+  await setConfig('user.signingKey', await signingKeyPath(identity.sshKeyPath, identity.sshKeyFingerprint), 'local', opts.cwd);
   if (opts.askpassScriptPath) {
     const signWrapper = await ensureSignWrapper(opts.askpassScriptPath);
     await setConfig('gpg.ssh.program', signWrapper, 'local', opts.cwd);
