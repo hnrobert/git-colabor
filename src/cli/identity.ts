@@ -109,6 +109,8 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
       return logout(parseCommandArgs(tokens), ctx);
     case 'agent':
       return agentKey(parseCommandArgs(tokens, AGENT_SPEC), ctx);
+    case 'hide':
+      return hideIdentityCmd(parseCommandArgs(tokens));
     case 'audit':
       return audit(parseCommandArgs(tokens, AUDIT_SPEC));
     case 'doctor':
@@ -127,7 +129,24 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
 async function ls(): Promise<JsonResult> {
   const { identities, defaultIdentity } = await listIdentities();
   const prints = await agentFingerprints();
-  return ok({ identities: identities.map((i) => identityToJson(i, defaultIdentity, prints)), defaultIdentity });
+  // machine-level hide suppresses the identity entirely — every scope,
+  // user-remembered included (hide outranks remember)
+  const hidden = new Set(await listHiddenEmails());
+  const visible = identities.filter((i) => !hidden.has(i.email.toLowerCase()));
+  return ok({ identities: visible.map((i) => identityToJson(i, defaultIdentity, prints)), defaultIdentity });
+}
+
+/** `identity hide <email>` — hide an identity on this machine (display + import). */
+async function hideIdentityCmd(p: CmdParsed): Promise<JsonResult> {
+  const email = p.positionals[0];
+  if (!email) throw Errors.usage('git colabor identity hide <email>');
+  await hideIdentityEmail(email);
+  await appendAudit({
+    action: 'identity.hide',
+    source: process.env.GIT_COLABOR_SOURCE === 'ext' ? 'ext' : 'cli',
+    message: email.toLowerCase(),
+  });
+  return ok({ hidden: email.toLowerCase() });
 }
 
 /**
@@ -500,6 +519,12 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
   const st = ctx.cwd ? await readState(ctx.cwd) : undefined;
   const signingKey = await getConfig('user.signingKey', 'local', ctx.cwd);
   const prints = await agentFingerprints();
+  // hide outranks every display scope, but the ACTIVE identity survives —
+  // it reflects the repo's current configuration, not a display preference
+  const hidden = new Set(await listHiddenEmails());
+  const rows = identities
+    .filter((i) => i.id === rs.activeIdentityId || !hidden.has(i.email.toLowerCase()))
+    .map((i) => ({ ...identityToJson(i, defaultIdentity, prints), active: i.id === rs.activeIdentityId }));
   return ok({
     repo: rs.repo,
     inRepo: rs.inRepo,
@@ -508,7 +533,7 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
     heldBy: rs.heldBy,
     signing: { enabled: st?.signing === true, key: signingKey ?? null },
     activeIdentity: active ? identityToJson(active, defaultIdentity, prints) : null,
-    identities: identities.map((i) => ({ ...identityToJson(i, defaultIdentity, prints), active: i.id === rs.activeIdentityId })),
+    identities: rows,
     selected: rs.selected,
     available: rs.available,
   });

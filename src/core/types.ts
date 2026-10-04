@@ -77,6 +77,7 @@ export type AuditAction =
   | 'identity.set'
   | 'identity.sign'
   | 'identity.disable'
+  | 'identity.hide'
   | 'coauthor.use'
   | 'coauthor.solo'
   | 'key.load'
