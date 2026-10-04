@@ -15,7 +15,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { askSocket } from '../core/secrets/askpass-protocol.js';
-import { discoverSessionBridge } from '../core/secrets/session-bridge.js';
+import { discoverSessionBridge, discoverSessionBridges } from '../core/secrets/session-bridge.js';
 
 /** Fingerprint of a key file via `ssh-keygen -lf`, or undefined. */
 function fingerprintOf(path: string): string | undefined {
@@ -29,10 +29,13 @@ async function main(): Promise<void> {
   let token = process.env.GIT_COLABOR_ASKPASS_TOKEN;
   let fingerprint = process.env.GIT_COLABOR_FINGERPRINT;
 
-  // push-time bare mode: prompt is argv[1], e.g. Enter passphrase for key '/home/x/k':
+  // bare mode: the prompt is argv[2]. Its key-path format depends on the
+  // caller — ssh says `Enter passphrase for key '/path': ` (single quotes),
+  // ssh-keygen (commit signing) says `Enter passphrase for "/path": ` (double
+  // quotes). Accept both.
   if (!fingerprint) {
     const prompt = process.argv[2] ?? '';
-    const keyPath = prompt.match(/for key '([^']+)'/)?.[1];
+    const keyPath = prompt.match(/for key '([^']+)'/)?.[1] ?? prompt.match(/for "([^"]+)"/)?.[1];
     if (keyPath) fingerprint = fingerprintOf(keyPath);
     if (!socketPath || !token) {
       const session = discoverSessionBridge();
@@ -48,6 +51,20 @@ async function main(): Promise<void> {
     if (got) {
       process.stdout.write(got);
       process.exit(0);
+    }
+  }
+  if (fingerprint) {
+    // bare mode with multiple instances: several windows / restarted exthosts
+    // each hold their OWN session store — the newest bridge may be an
+    // instance that never saw this key's passphrase. Try every bridge,
+    // newest first; dead sockets refuse instantly, empty ones close silently.
+    for (const b of discoverSessionBridges()) {
+      if (b.socketPath === socketPath) continue; // already tried above
+      const got = await askSocket(b.socketPath, b.token, fingerprint);
+      if (got) {
+        process.stdout.write(got);
+        process.exit(0);
+      }
     }
   }
   process.stderr.write('git-colabor askpass: no passphrase available\n');
