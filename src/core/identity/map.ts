@@ -14,9 +14,12 @@ export async function readMap(): Promise<IdentityMap> {
     const txt = await readFile(mapPath(), 'utf8');
     const parsed = JSON.parse(txt) as Partial<IdentityMap>;
     const identities = { ...parsed.identities };
-    // strip the removed passphraseCommand field so stale entries vanish on next write
     for (const id of Object.keys(identities)) {
-      delete (identities[id] as { passphraseCommand?: string }).passphraseCommand;
+      const row = identities[id] as { passphraseCommand?: string; scope?: string };
+      // strip the removed passphraseCommand field so stale entries vanish on next write
+      delete row.passphraseCommand;
+      // pre-rename spelling of the vscode scope
+      if (row.scope === 'user') row.scope = 'vscode';
     }
     return {
       schemaVersion: 1,

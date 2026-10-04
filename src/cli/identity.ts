@@ -394,10 +394,11 @@ async function setIdentity(p: CmdParsed): Promise<JsonResult> {
   }
   if (p.values['--scope']) {
     const s = p.values['--scope'];
-    if (s !== 'user' && s !== 'machine' && s !== 'project') {
-      throw Errors.usage(`--scope must be user|machine|project, got "${s}"`);
+    // 'user' is the pre-rename spelling of 'vscode' — accepted as an alias
+    if (s !== 'vscode' && s !== 'user' && s !== 'machine' && s !== 'project') {
+      throw Errors.usage(`--scope must be vscode|machine|project, got "${s}"`);
     }
-    patch.scope = s;
+    patch.scope = s === 'user' ? 'vscode' : s;
   }
   if (Object.keys(patch).length === 0) {
     throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key');
