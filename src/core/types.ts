@@ -23,7 +23,7 @@ export type Identity = {
   /** set when a passphrase failure disabled the identity — explicit `use` re-enables */
   disabled?: boolean;
   /** where this identity is remembered: user (vscode config), machine (identities.json), or project (repo scan) */
-  scope?: 'vscode' | 'machine' | 'project';
+  scope?: 'machine' | 'project';
   /** per-remote key paths: { "origin": "/path/to/key", ... } — keyed by git remote name */
   remoteKeys?: Record<string, string>;
   /** ISO8601 */

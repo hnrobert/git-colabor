@@ -18,8 +18,10 @@ export async function readMap(): Promise<IdentityMap> {
       const row = identities[id] as { passphraseCommand?: string; scope?: string };
       // strip the removed passphraseCommand field so stale entries vanish on next write
       delete row.passphraseCommand;
-      // pre-rename spelling of the vscode scope
-      if (row.scope === 'user') row.scope = 'vscode';
+      // 'user'/'vscode' were pre-cleanup spellings of a scope this store never
+      // really had — rows tagged so were ordinary machine-store residents
+      // (the "vscode memory" is the extension's settings layer, not this file)
+      if (row.scope === 'user' || row.scope === 'vscode') row.scope = 'machine';
     }
     return {
       schemaVersion: 1,
