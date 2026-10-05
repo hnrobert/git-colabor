@@ -14,8 +14,11 @@
  * Bundled separately to dist/askpass.cjs (see tsup.config.ts).
  */
 import { spawnSync } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { askSocket } from '../core/secrets/askpass-protocol.js';
 import { discoverSessionBridge, discoverSessionBridges } from '../core/secrets/session-bridge.js';
+import { dataDir as colaborDir } from '../core/paths.js';
 
 /** Fingerprint of a key file via `ssh-keygen -lf`, or undefined. */
 function fingerprintOf(path: string): string | undefined {
@@ -31,11 +34,16 @@ async function main(): Promise<void> {
 
   // bare mode: the prompt is argv[2]. Its key-path format depends on the
   // caller — ssh says `Enter passphrase for key '/path': ` (single quotes),
-  // ssh-keygen (commit signing) says `Enter passphrase for "/path": ` (double
-  // quotes). Accept both.
+  // some ssh-keygen builds say `Enter passphrase for "/path": ` (double
+  // quotes), others a BARE "Enter passphrase: " with no path at all. Accept
+  // both prompt forms, then fall back to GIT_COLABOR_SIGNING_KEY (exported by
+  // the sign wrapper, which sees -f <key> in its own argv).
   if (!fingerprint) {
     const prompt = process.argv[2] ?? '';
-    const keyPath = prompt.match(/for key '([^']+)'/)?.[1] ?? prompt.match(/for "([^"]+)"/)?.[1];
+    const keyPath =
+      prompt.match(/for key '([^']+)'/)?.[1] ??
+      prompt.match(/for "([^"]+)"/)?.[1] ??
+      process.env.GIT_COLABOR_SIGNING_KEY;
     if (keyPath) fingerprint = fingerprintOf(keyPath);
     if (!socketPath || !token) {
       const session = discoverSessionBridge();
@@ -66,6 +74,16 @@ async function main(): Promise<void> {
         process.exit(0);
       }
     }
+  }
+  // failure trace (no secrets): makes "no passphrase available" diagnosable —
+  // which prompt we saw, whether the key fingerprinted, how many bridges answered
+  try {
+    appendFileSync(
+      join(colaborDir(), 'askpass-debug.log'),
+      `${new Date().toISOString()} prompt="${(process.argv[2] ?? '').slice(0, 120)}" fp=${fingerprint ?? 'none'} envSock=${!!socketPath} bridges=${discoverSessionBridges().length}\n`,
+    );
+  } catch {
+    // never fail the askpass because of its own debug log
   }
   process.stderr.write('git-colabor askpass: no passphrase available\n');
   process.exit(1);

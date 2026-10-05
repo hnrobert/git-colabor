@@ -26,11 +26,29 @@ async function safeTopLevel(cwd?: string): Promise<string | undefined> {
  * SSH_ASKPASS pointing at our askpass helper. git invokes `gpg.ssh.program`
  * for every commit-signing operation, so the passphrase is fetched from the
  * extension's session store without prompting the user each time.
+ *
+ * The wrapper also extracts `-f <signingKey>` from its own argv and exports
+ * it as GIT_COLABOR_SIGNING_KEY: some OpenSSH builds (notably Ubuntu's
+ * ssh-keygen signing path) invoke the askpass with a BARE "Enter passphrase:"
+ * prompt — no key path — so the helper cannot fingerprint the key from the
+ * prompt and needs this side channel instead.
  */
 export async function ensureSignWrapper(askpassScriptPath?: string): Promise<string> {
   const wrapperPath = join(dataDir(), 'sign-wrapper.sh');
   const askpass = askpassScriptPath ? await ensureAskpassWrapper(askpassScriptPath) : join(dataDir(), 'askpass-wrapper.sh');
-  const content = `#!/bin/sh\nSSH_ASKPASS="${askpass}" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 exec ssh-keygen "$@"\n`;
+  const content = [
+    '#!/bin/sh',
+    '# extract -f <key> so the askpass helper can fingerprint it even when',
+    '# the prompt carries no key path (bare "Enter passphrase:" on some OpenSSH)',
+    'signkey=',
+    'prev=',
+    'for a in "$@"; do',
+    '  if [ "$prev" = "-f" ]; then signkey="$a"; break; fi',
+    '  prev="$a"',
+    'done',
+    `SSH_ASKPASS="${askpass}" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 GIT_COLABOR_SIGNING_KEY="$signkey" exec ssh-keygen "$@"`,
+    '',
+  ].join('\n');
   if (existsSync(wrapperPath)) {
     const existing = await readFile(wrapperPath, 'utf8');
     if (existing === content) return wrapperPath;

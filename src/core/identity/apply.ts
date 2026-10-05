@@ -9,6 +9,7 @@ import { appendAudit } from '../logging/audit.js';
 import { keyInAgent } from './agent.js';
 import { getIdentity, updateIdentity } from './map.js';
 import { importKey } from './keys.js';
+import { ensureSignWrapper } from './sign.js';
 import { discoverSessionBridge } from '../secrets/session-bridge.js';
 import { AppError } from '../errors.js';
 import { existsSync } from 'node:fs';
@@ -86,7 +87,9 @@ export async function applyResolvedIdentity(args: {
   // When enabled, re-bind the signing key to the newly applied identity's
   // usable key so signatures follow the committer; a key-less identity
   // leaves the existing signing config untouched. Agent-held keys sign via
-  // their public half (see signingKeyPath in sign.ts).
+  // their public half (see signingKeyPath in sign.ts). The sign wrapper is
+  // also refreshed (content-compare rewrite) so older wrappers update to the
+  // current layout without a manual sign re-toggle.
   if (state.signing === true && identity?.sshKeyPath && sshCommand) {
     await setConfig('commit.gpgsign', 'true', 'local', opts.cwd);
     await setConfig('gpg.format', 'ssh', 'local', opts.cwd);
@@ -95,6 +98,9 @@ export async function applyResolvedIdentity(args: {
       && (await keyInAgent(identity.sshKeyFingerprint))
       && existsSync(pub);
     await setConfig('user.signingKey', viaAgent ? pub : identity.sshKeyPath, 'local', opts.cwd);
+    if (opts.askpassScriptPath) {
+      await setConfig('gpg.ssh.program', await ensureSignWrapper(opts.askpassScriptPath), 'local', opts.cwd);
+    }
   }
   await writeState(state, opts.cwd);
 
