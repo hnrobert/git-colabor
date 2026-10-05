@@ -3,6 +3,7 @@ import { readState, writeState } from '../repo/state.js';
 import { getIdentity, listIdentities } from './map.js';
 import { removeKey } from './agent.js';
 import { appendAudit } from '../logging/audit.js';
+import { unsetConfig } from '../git/config.js';
 import { Errors } from '../errors.js';
 import type { Source } from '../types.js';
 
@@ -45,6 +46,16 @@ export async function logoutIdentity(opts: {
   if (state.activeIdentity === identity.id) {
     state.activeIdentity = undefined;
     state.heldBy = undefined;
+    // the signing config belongs to THIS identity's key — leaving it behind
+    // orphans user.signingKey and every commit fails with a cryptic askpass
+    // error while no identity is active
+    if (state.signing === true) {
+      state.signing = false;
+      await unsetConfig('commit.gpgsign', 'local', opts.cwd);
+      await unsetConfig('gpg.format', 'local', opts.cwd);
+      await unsetConfig('user.signingKey', 'local', opts.cwd);
+      await unsetConfig('gpg.ssh.program', 'local', opts.cwd);
+    }
     await writeState(state, opts.cwd);
   }
 

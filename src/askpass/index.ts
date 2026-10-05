@@ -77,15 +77,23 @@ async function main(): Promise<void> {
   }
   // failure trace (no secrets): makes "no passphrase available" diagnosable —
   // which prompt we saw, whether the key fingerprinted, how many bridges answered
+  const bridges = discoverSessionBridges();
   try {
     appendFileSync(
       join(colaborDir(), 'askpass-debug.log'),
-      `${new Date().toISOString()} prompt="${(process.argv[2] ?? '').slice(0, 120)}" fp=${fingerprint ?? 'none'} envSock=${!!socketPath} bridges=${discoverSessionBridges().length}\n`,
+      `${new Date().toISOString()} prompt="${(process.argv[2] ?? '').slice(0, 120)}" fp=${fingerprint ?? 'none'} envSock=${!!socketPath} bridges=${bridges.length}\n`,
     );
   } catch {
     // never fail the askpass because of its own debug log
   }
-  process.stderr.write('git-colabor askpass: no passphrase available\n');
+  // actionable message instead of a bare "no passphrase available": no session
+  // at all means no window is connected; sessions present but no passphrase
+  // means the key's identity was never used / the prompt was dismissed
+  process.stderr.write(
+    bridges.length === 0
+      ? 'git-colabor askpass: no Git Colabor session running — reload the VS Code window or select an identity first\n'
+      : 'git-colabor askpass: no passphrase for this key — click your identity in the Git Colabor view (or select an identity)\n',
+  );
   process.exit(1);
 }
 

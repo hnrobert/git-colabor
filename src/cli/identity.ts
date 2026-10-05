@@ -23,7 +23,7 @@ import { setCommitSigning } from '../core/identity/sign.js';
 import { logoutIdentity } from '../core/identity/logout.js';
 import { appendAudit, readAudit } from '../core/logging/audit.js';
 import { agentFingerprints, keyInAgent, listAgent, loadKey, removeKey, verifyKey } from '../core/identity/agent.js';
-import { getConfig } from '../core/git/config.js';
+import { getConfig, unsetConfig } from '../core/git/config.js';
 import { insideWorkTree, topLevel } from '../core/git/rev.js';
 import { readState, writeState } from '../core/repo/state.js';
 import { repoStatus } from '../core/repo/status.js';
@@ -478,6 +478,14 @@ async function disable(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
     if (state.activeIdentity === id) {
       state.activeIdentity = undefined;
       state.heldBy = undefined;
+      // same as logout: an orphaned signing config fails every commit
+      if (state.signing === true) {
+        state.signing = false;
+        await unsetConfig('commit.gpgsign', 'local', ctx.cwd);
+        await unsetConfig('gpg.format', 'local', ctx.cwd);
+        await unsetConfig('user.signingKey', 'local', ctx.cwd);
+        await unsetConfig('gpg.ssh.program', 'local', ctx.cwd);
+      }
       await writeState(state, ctx.cwd);
       deactivated = true;
     }
