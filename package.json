@@ -1,9 +1,13 @@
 {
   "name": "git-colabor",
   "version": "0.1.2",
-  "description": "Git co-author + multi-identity + SSH key management CLI (git colabor)",
+  "description": "Git co-author + multi-identity + SSH key management CLI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hnrobert/git-colabor.git"
+  },
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "bin": {
     "git-colabor": "bin/git-colabor.cjs"
   },

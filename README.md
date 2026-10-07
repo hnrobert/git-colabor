@@ -179,4 +179,4 @@ Contributions follow the AIM standards — see [CONTRIBUTING.md](../CONTRIBUTING
 
 ## License
 
-MIT — see the [extension repo](https://github.com/hnrobert/vscode-git-colabor).
+Apache-2.0 — see [LICENSE](LICENSE).
