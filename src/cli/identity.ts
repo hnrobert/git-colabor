@@ -38,7 +38,7 @@ export type IdCtx = {
   token?: string;
 };
 
-const USE_SPEC = { valueFlags: ['--source', '--as-name', '--as-email'], boolFlags: ['--no-override'] };
+const USE_SPEC = { valueFlags: ['--source', '--as-name', '--as-email', '--stale-minutes'], boolFlags: ['--no-override'] };
 const ADD_SPEC = {
   valueFlags: ['--name', '--email', '--key', '--host', '--source'],
   boolFlags: ['--default', '--no-encrypt'],
@@ -221,6 +221,10 @@ async function agentKey(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
 async function use(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const id = p.positionals[0];
   if (!id) throw Errors.usage('git colabor identity use <id>');
+  const staleRaw = p.values['--stale-minutes'];
+  if (staleRaw !== undefined && !Number.isFinite(Number(staleRaw))) {
+    throw Errors.usage(`--stale-minutes must be a number, got "${staleRaw}"`);
+  }
   // an explicit use is explicit intent — re-enable a disabled identity
   const current = await getIdentity(id);
   if (current.disabled) await updateIdentity(id, { disabled: undefined });
@@ -230,6 +234,7 @@ async function use(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
     asName: p.values['--as-name'],
     asEmail: p.values['--as-email'],
     noOverride: p.bools.has('--no-override'),
+    staleMinutes: staleRaw ? Number(staleRaw) : undefined,
     askpassScriptPath: ctx.askpassScriptPath,
     socketPath: ctx.socketPath,
     token: ctx.token,
