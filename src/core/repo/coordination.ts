@@ -16,7 +16,9 @@ export function isStale(heldBy: HeldBy, staleMinutes: number): boolean {
 export async function detectConflict(
   session: string,
   cwd?: string,
-  staleMinutes = 5,
+  // no threshold by default: another session's lock never silently expires —
+  // staleness is opt-in via `--stale-minutes` / the extension setting
+  staleMinutes = Infinity,
 ): Promise<ConflictInfo | null> {
   const st = await readState(cwd);
   const hb = st.heldBy;
