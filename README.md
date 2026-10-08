@@ -47,14 +47,14 @@ git colabor identity add --name "Robert" --email me@personal.io \
 # 2. Use one in the current repo
 git colabor identity use id_a1b2c3d4      # from `identity ls`
 
-# 3. Pairing: add a co-author and select them for this repo
-git colabor coauthor add jd "Jamie Doe" jamie@example.com
-git colabor coauthor use jd               # trailers go into .gitmessage
+# 3. Pairing: add a co-author (must exist as an identity)
+git colabor coauthor add jamie@example.com           # next commit only
+git colabor coauthor add jamie@example.com --always  # every commit in this repo
 
 git commit                                # Co-authored-by: trailer included
 
 # 4. Done pairing / leaving the repo
-git colabor coauthor solo
+git colabor coauthor rm jamie@example.com
 git colabor identity revert               # restore pre-tool git config
 ```
 
@@ -64,11 +64,10 @@ git colabor identity revert               # restore pre-tool git config
 
 | Command | Effect |
 | --- | --- |
-| `coauthor ls [filter]` | List catalogue entries (key / name / email); optional substring filter. |
-| `coauthor use <key…>` | Select co-authors for the current repo (no args: print current selection). |
-| `coauthor solo` | Clear the selection. |
-| `coauthor print [-i]` | Print `Co-authored-by:` trailer blob (`-i`: comma-joined keys instead). |
-| `coauthor add <key> "Name" <email>` | Add to `.git-coauthors`. |
+| `coauthor add <email\|id> [--always] [--global]` | Add a co-author: one-shot (next commit), `--always` (every commit in this repo), `--global` (every repo). The person must exist as an identity. |
+| `coauthor rm <email\|id>` | Remove a co-author from every scope it is active in. |
+| `coauthor ls [filter]` | Active co-authors + available candidates (identities minus the active one); optional substring filter. |
+| `coauthor print` | Print the `Co-authored-by:` trailer blob for the current selection. |
 | `coauthor suggest [filter]` | Suggest co-authors from `git shortlog` history; interactive pick without `--json`. |
 
 Selecting co-authors rewrites the commit template (`commit.template` / `~/.gitmessage`): all existing `Co-authored-by:` trailers are stripped and the current selection re-appended — the same behavior as git-mob's message formatter.
@@ -129,7 +128,6 @@ This is the contract the VS Code extension consumes.
 | `~/.config/git-colabor/identities.json` | Identity map (referenced key paths + fingerprints; env `GIT_COLABOR_MAP`) | `0600` |
 | `~/.config/git-colabor/audit.log` | JSONL audit trail | `0600` |
 | `<git-dir>/colabor/state.json` | Per-repo state: active identity, `heldBy`, opt-in signing flag, config backups | `0600` |
-| `.git-coauthors` (repo, else `~/.git-coauthors`) | Co-author catalogue, git-mob-compatible JSON | — |
 | `~/.gitmessage` (or `commit.template`) | Commit template seeded with trailers | — |
 
 (Windows: the data dir is `%APPDATA%\git-colabor`.)
@@ -138,8 +136,8 @@ Git config keys **written locally** per repo: `user.name`, `user.email`, `core.s
 
 ## git-mob compatibility
 
-- Same `.git-coauthors` **JSON** format (`{"coauthors": {"jd": {"name": …, "email": …}}}`) and same 3-tier resolution (env → repo → home).
-- Same trailer format `Co-authored-by: NAME <EMAIL>` and template rewrite semantics; same shortlog-derived key generation (`rkrk` for "Richard Kotze" `<rkotze@…>`).
+- Same trailer format `Co-authored-by: NAME <EMAIL>` and the same template-rewrite semantics (strip existing trailers, re-append the current selection).
+- Co-author candidates come from **identities**, not `.git-coauthors` — the catalogue file plays no role.
 - Does **not** read or write git-mob's `git-mob.co-author` config — the two tools can coexist.
 
 ## Security notes
@@ -156,7 +154,6 @@ Full threat model: [docs/SECURITY.md](../docs/SECURITY.md) in the extension repo
 | --- | --- |
 | `GIT_COLABOR_MAP` | identity map path |
 | `GIT_COLABOR_AUDIT_FILE` | audit log path |
-| `GIT_COLABOR_COAUTHORS_PATH` | `.git-coauthors` path |
 | `GIT_COLABOR_MESSAGE_PATH` | commit template path |
 | `GIT_COLABOR_LOG_FILE` / `GIT_COLABOR_LOG_LEVEL` | CLI debug log |
 | `GIT_COLABOR_ASKPASS_SOCK` / `GIT_COLABOR_ASKPASS_TOKEN` | askpass bridge endpoint (set by the extension) |
