@@ -114,7 +114,7 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(conflict?.heldBy.session).toBe('ext:OTHER');
   });
 
-  it('stale heldBy is not a conflict', async () => {
+  it('an old heldBy never goes stale by default, and only expires with an explicit threshold', async () => {
     const st = await readState(root);
     st.heldBy = {
       session: 'ext:OTHER',
@@ -124,7 +124,12 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
       source: 'ext',
     };
     await writeState(st, root);
-    expect(await detectConflict(cliSessionId(), root)).toBeNull();
+    // default = no threshold: a session lock never silently expires
+    expect(await detectConflict(cliSessionId(), root)).not.toBeNull();
+    // opt-in threshold: 1 h > 30 min → stale, no conflict
+    expect(await detectConflict(cliSessionId(), root, 30)).toBeNull();
+    // threshold larger than the age → still a conflict
+    expect(await detectConflict(cliSessionId(), root, 120)).not.toBeNull();
     st.heldBy = undefined;
     await writeState(st, root);
   });
