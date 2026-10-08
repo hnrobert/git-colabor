@@ -1,5 +1,9 @@
 # git-colabor
 
+<p align="center">
+  <img src="assets/images/git-co-author-enhanced.png" width="140" alt="Git Colabor logo" />
+</p>
+
 **`git colabor`** — switch the Git **committer + pusher identity** and **SSH key** per repository, and manage **co-authors** with a better experience, from one CLI.
 
 This is the CLI half of Git Colabor. A VS Code extension ([`vscode-git-colabor`](https://github.com/hnrobert/vscode-git-colabor)) bundles this binary and drives it over its `--json` interface — but the CLI is fully standalone and scriptable.
