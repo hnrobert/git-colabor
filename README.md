@@ -28,7 +28,7 @@ You share a machine — a lab workstation, a pair-programming box, a Remote-SSH 
 Requires **Node.js >= 24**.
 
 ```bash
-npm install -g git-colabor        # once published (M6)
+npm install -g git-colabor
 # or from source:
 git clone git@github.com:hnrobert/git-colabor.git && cd git-colabor
 pnpm install && pnpm build && npm link
