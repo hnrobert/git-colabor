@@ -1,6 +1,6 @@
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setConfig } from '../git/config.js';
+import { setConfig, unsetConfig } from '../git/config.js';
 import { dataDir } from '../paths.js';
 import { topLevel } from '../git/rev.js';
 import { captureBackupIfFirstTouch, readState, writeState } from '../repo/state.js';
@@ -76,7 +76,14 @@ export async function applyResolvedIdentity(args: {
   await captureBackupIfFirstTouch(opts.cwd);
   await setConfig('user.name', name, 'local', opts.cwd);
   await setConfig('user.email', email, 'local', opts.cwd);
-  if (sshCommand) await setConfig('core.sshCommand', sshCommand, 'local', opts.cwd);
+  if (sshCommand) {
+    await setConfig('core.sshCommand', sshCommand, 'local', opts.cwd);
+  } else if (identity && !identity.sshKeyPath) {
+    // a key-less identity must not keep pushing with the PREVIOUS identity's
+    // key — an encrypted leftover key is exactly what triggers passphrase
+    // prompts while the current identity owns none
+    await unsetConfig('core.sshCommand', 'local', opts.cwd);
+  }
   await setConfig('colabor.managed', 'true', 'local', opts.cwd);
   await setConfig('colabor.managed-by', opts.source, 'local', opts.cwd);
 
@@ -86,7 +93,8 @@ export async function applyResolvedIdentity(args: {
   // Commit signing is OPT-IN per repo (right-click toggle → `identity sign`).
   // When enabled, re-bind the signing key to the newly applied identity's
   // usable key so signatures follow the committer; a key-less identity
-  // leaves the existing signing config untouched. Agent-held keys sign via
+  // cannot sign, so the previous identity's signing config is cleared
+  // (same reasoning as core.sshCommand above). Agent-held keys sign via
   // their public half (see signingKeyPath in sign.ts). The sign wrapper is
   // also refreshed (content-compare rewrite) so older wrappers update to the
   // current layout without a manual sign re-toggle.
@@ -101,6 +109,12 @@ export async function applyResolvedIdentity(args: {
     if (opts.askpassScriptPath) {
       await setConfig('gpg.ssh.program', await ensureSignWrapper(opts.askpassScriptPath), 'local', opts.cwd);
     }
+  } else if (state.signing === true && identity && !identity.sshKeyPath) {
+    state.signing = false;
+    await unsetConfig('commit.gpgsign', 'local', opts.cwd);
+    await unsetConfig('gpg.format', 'local', opts.cwd);
+    await unsetConfig('user.signingKey', 'local', opts.cwd);
+    await unsetConfig('gpg.ssh.program', 'local', opts.cwd);
   }
   await writeState(state, opts.cwd);
 
