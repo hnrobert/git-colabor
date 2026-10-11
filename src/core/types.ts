@@ -26,6 +26,8 @@ export type Identity = {
   scope?: 'machine' | 'project';
   /** per-remote key paths: { "origin": "/path/to/key", ... } — keyed by git remote name */
   remoteKeys?: Record<string, string>;
+  /** OpenPGP key (fingerprint) this identity signs commits with; wins over the SSH key */
+  gpgKey?: string;
   /** ISO8601 */
   createdAt: string;
 };
@@ -63,7 +65,7 @@ export type RepoState = {
   schemaVersion: 1;
   activeIdentity?: string;
   heldBy?: HeldBy;
-  /** user opted into SSH commit signing for this repo (right-click toggle) */
+  /** user opted into commit signing with the active identity's key for this repo (right-click toggle) */
   signing?: boolean;
   /** captured on first touch */
   backups?: Backups;

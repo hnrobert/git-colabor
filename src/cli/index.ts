@@ -40,7 +40,9 @@ function topHelp(): string {
     '  git colabor identity add --name <n> --email <e> [--key <path>]',
     '  git colabor identity import   (add all history committers as identities)',
     '  git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key',
-    '  git colabor identity sign <id> [--off]   (opt-in SSH commit signing)',
+    '                               | --gpg-key <key> | --no-gpg-key   (GPG key to sign with)',
+    '  git colabor identity sign <id> | sign [id] --off   (opt-in commit signing; GPG key if bound, else SSH)',
+    '  git colabor identity gpg-keys             (secret GPG keys usable for signing)',
     '  git colabor identity disable <id>        (deactivate on key/passphrase failure)',
     '  git colabor identity rm <id>',
     '  git colabor identity logout [id]',
@@ -235,10 +237,15 @@ function identityHuman(command: string | undefined, d: unknown): string {
     }`;
   }
   if (command === 'sign') {
-    const data = d as { signing: boolean; key?: string };
+    const data = d as { signing: boolean; format?: string; key?: string };
     return data.signing
-      ? `SSH commit signing ON (${data.key}).`
-      : 'SSH commit signing OFF.';
+      ? `Commit signing ON (${data.format} ${data.key}).`
+      : 'Commit signing OFF (this repo does not sign, whatever global config says).';
+  }
+  if (command === 'gpg-keys') {
+    const keys = (d as { keys: Array<{ fingerprint: string; uids: string[] }> }).keys;
+    if (keys.length === 0) return 'No secret GPG keys usable for signing.';
+    return keys.map((k) => `${k.fingerprint}  ${k.uids.join(', ')}`).join('\n');
   }
   if (command === 'import') {
     const data = d as { added: IdentityJson[]; skipped: number };

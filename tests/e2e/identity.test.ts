@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { addIdentity, hideIdentityEmail, listIdentities, removeIdentity, updateIdentity } from '../../src/core/identity/map.js';
 import { applyIdentity } from '../../src/core/identity/apply.js';
 import { revertRepo } from '../../src/core/identity/revert.js';
-import { setCommitSigning } from '../../src/core/identity/sign.js';
+import { setCommitSigning, signingStatus } from '../../src/core/identity/sign.js';
 import { logoutIdentity } from '../../src/core/identity/logout.js';
 import { fingerprintOfFile, importKey } from '../../src/core/identity/keys.js';
 import { readState, writeState } from '../../src/core/repo/state.js';
@@ -242,6 +242,80 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     await revertRepo({ source: 'cli', cwd: root }); // had no signing before us → stays unset
     expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
     await rm(keyDir, { recursive: true, force: true });
+  });
+
+  it('signing off really stops signing when global config still signs, and status names the scope', async () => {
+    const keyDir = await mkdtemp(join(tmpdir(), 'ca-key-global-'));
+    const keyPath = join(keyDir, 'id_sign');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'sign'], { encoding: 'utf8' });
+    const imp = await importKey(keyPath);
+    const signer = await addIdentity({ name: 'Globe', email: 'globe@x.com', sshKeyFingerprint: imp.fingerprint, sshKeyPath: imp.path });
+    git(root, ['config', '--global', 'commit.gpgsign', 'true']);
+    try {
+      const inherited = await signingStatus(root, false);
+      expect(inherited).toMatchObject({ enabled: true, scope: 'global', managed: false });
+      expect(inherited.origin).toBe(join(home, '.gitconfig'));
+
+      await applyIdentity(signer.id, { source: 'cli', cwd: root });
+      await setCommitSigning({ source: 'cli', cwd: root, id: signer.id, on: true });
+      expect(await signingStatus(root, true)).toMatchObject({ enabled: true, scope: 'local', format: 'ssh', key: keyPath });
+
+      // unsetting alone would fall back to the global `true` — off pins false locally
+      await setCommitSigning({ source: 'cli', cwd: root, on: false });
+      expect(await getConfig('commit.gpgsign', 'local', root)).toBe('false');
+      expect(await getConfig('user.signingKey', 'local', root)).toBeUndefined();
+      expect(await signingStatus(root, false)).toMatchObject({ enabled: false, scope: 'local' });
+
+      // switching to a key-less identity while signing is just as final
+      await setCommitSigning({ source: 'cli', cwd: root, id: signer.id, on: true });
+      const keyless = await addIdentity({ name: 'NoKey', email: 'nokey@x.com' });
+      await applyIdentity(keyless.id, { source: 'cli', cwd: root });
+      expect((await readState(root)).signing).toBe(false);
+      expect(await getConfig('commit.gpgsign', 'local', root)).toBe('false');
+    } finally {
+      git(root, ['config', '--global', '--unset', 'commit.gpgsign']);
+    }
+    // nothing below signs any more → off leaves no local override behind
+    await setCommitSigning({ source: 'cli', cwd: root, on: false });
+    expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
+    await rm(keyDir, { recursive: true, force: true });
+  });
+
+  it('an identity bound to a GPG key signs with OpenPGP, and status reports the key owner', async () => {
+    // stand-in for gpg: always lists one signing key owned by gpg-user@x.com
+    const binDir = await mkdtemp(join(tmpdir(), 'ca-fake-gpg-'));
+    const fakeGpg = join(binDir, 'gpg');
+    const fpr = 'AAAABBBBCCCCDDDDEEEEFFFF1111222233334444';
+    await writeFile(
+      fakeGpg,
+      [
+        '#!/bin/sh',
+        "echo 'sec:u:255:22:1111222233334444:1700000000:::u:::scESC:::+:::ed25519:::0:'",
+        `echo 'fpr:::::::::${fpr}:'`,
+        "echo 'uid:u::::1700000000::H::GPG User <gpg-user@x.com>::::::::::0:'",
+        '',
+      ].join('\n'),
+    );
+    await chmodFile(fakeGpg, 0o755);
+    git(root, ['config', '--global', 'gpg.program', fakeGpg]);
+    try {
+      const g = await addIdentity({ name: 'GpgUser', email: 'gpg-user@x.com', gpgKey: fpr });
+      await applyIdentity(g.id, { source: 'cli', cwd: root });
+      await setCommitSigning({ source: 'cli', cwd: root, id: g.id, on: true });
+      expect(await getConfig('gpg.format', 'local', root)).toBe('openpgp');
+      expect(await getConfig('user.signingKey', 'local', root)).toBe(fpr);
+      expect(await getConfig('gpg.ssh.program', 'local', root)).toBeUndefined();
+      expect(await signingStatus(root, true)).toMatchObject({
+        enabled: true,
+        format: 'openpgp',
+        managed: true,
+        keyEmails: ['gpg-user@x.com'],
+      });
+      await setCommitSigning({ source: 'cli', cwd: root, on: false });
+    } finally {
+      git(root, ['config', '--global', '--unset', 'gpg.program']);
+      await rm(binDir, { recursive: true, force: true });
+    }
   });
 
   it('logout removes the key from the agent but never deletes the file', async () => {

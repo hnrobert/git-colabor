@@ -14,6 +14,29 @@ export async function getConfig(key: string, scope?: Scope, cwd?: string): Promi
   return v.length > 0 ? v : undefined;
 }
 
+export type ScopedValue = {
+  value: string;
+  /** git's scope name: local / global / system / worktree / command */
+  scope: string;
+  /** the file (or source) the winning value came from */
+  origin: string;
+};
+
+/**
+ * Effective value of a key across ALL scopes (last one wins, like git
+ * itself) plus the scope and file it came from. `type: 'bool'` normalizes
+ * yes/on/1 to "true". undefined if unset everywhere.
+ */
+export async function getEffectiveConfig(key: string, cwd?: string, type?: 'bool'): Promise<ScopedValue | undefined> {
+  const r = await gitRaw(
+    ['config', '--show-scope', '--show-origin', ...(type ? [`--type=${type}`] : []), '--get', key],
+    { cwd },
+  );
+  if (r.exitCode !== 0) return undefined;
+  const [scope = '', origin = '', ...value] = r.stdout.replace(/\n$/, '').split('\t');
+  return { value: value.join('\t'), scope, origin: origin.replace(/^file:/, '') };
+}
+
 /** Read all values for a multi-valued key. '' if unset. */
 export async function getAllConfig(key: string, scope?: Scope, cwd?: string): Promise<string> {
   const r = await gitRaw(['config', ...scopeArgs(scope), '--get-all', key], { cwd });

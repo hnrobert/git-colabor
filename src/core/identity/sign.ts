@@ -1,4 +1,4 @@
-import { setConfig, unsetConfig } from '../git/config.js';
+import { getEffectiveConfig, setConfig, unsetConfig } from '../git/config.js';
 import { topLevel, insideWorkTree } from '../git/rev.js';
 import { readState, writeState } from '../repo/state.js';
 import { getIdentity } from './map.js';
@@ -8,10 +8,11 @@ import { appendAudit } from '../logging/audit.js';
 import { Errors } from '../errors.js';
 import { dataDir } from '../paths.js';
 import { ensureAskpassWrapper } from './apply.js';
+import { listSigningKeys } from './gpg.js';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import type { Source } from '../types.js';
+import type { Identity, Source } from '../types.js';
 
 async function safeTopLevel(cwd?: string): Promise<string | undefined> {
   try {
@@ -73,57 +74,142 @@ async function signingKeyPath(sshKeyPath: string, fingerprint?: string): Promise
   return sshKeyPath;
 }
 
+/** What an identity signs with: its bound GPG key wins, else its usable SSH key. */
+export type SigningConfig = { format: 'openpgp' | 'ssh'; key: string };
+
+async function signingConfigFor(identity: Identity): Promise<SigningConfig | undefined> {
+  if (identity.gpgKey) return { format: 'openpgp', key: identity.gpgKey };
+  if (identity.sshKeyPath && (await keyUsable(identity.sshKeyPath))) {
+    return { format: 'ssh', key: await signingKeyPath(identity.sshKeyPath, identity.sshKeyFingerprint) };
+  }
+  return undefined;
+}
+
 /**
- * Toggle SSH commit signing for a repo (the right-click "Sign commits with
- * this key" / "Stop signing" action). Opt-in: `identity use` never turns
- * signing on by itself; when signing is enabled it re-binds to the applied
- * identity's usable key. When driven by the extension (askpassScriptPath
- * known) `gpg.ssh.program` is set to a wrapper so commit signing gets its
- * passphrase from the session store without prompting every commit.
+ * Point the repo-local signing config at an identity's key (GPG or SSH).
+ * Writes nothing and returns undefined when the identity has no key to sign
+ * with. SSH signing goes through the askpass sign wrapper when driven by the
+ * extension; OpenPGP keeps the user's own `gpg.program` / gpg-agent pinentry.
+ */
+export async function writeIdentitySigning(
+  identity: Identity,
+  cwd?: string,
+  askpassScriptPath?: string,
+): Promise<SigningConfig | undefined> {
+  const cfg = await signingConfigFor(identity);
+  if (!cfg) return undefined;
+  await setConfig('commit.gpgsign', 'true', 'local', cwd);
+  await setConfig('gpg.format', cfg.format, 'local', cwd);
+  await setConfig('user.signingKey', cfg.key, 'local', cwd);
+  if (cfg.format === 'ssh' && askpassScriptPath) {
+    await setConfig('gpg.ssh.program', await ensureSignWrapper(askpassScriptPath), 'local', cwd);
+  } else if (cfg.format === 'openpgp') {
+    await unsetConfig('gpg.ssh.program', 'local', cwd);
+  }
+  return cfg;
+}
+
+/**
+ * Turn commit signing OFF for the repo — for real. Unsetting the local keys
+ * alone falls back to global/system config, so e.g. a personal GPG key in
+ * ~/.gitconfig would keep signing every identity's commits. After dropping
+ * colabor's own keys (`managed`; a user's hand-written signing key is left
+ * alone), `commit.gpgsign=false` is pinned locally whenever a lower scope
+ * would still sign.
+ */
+export async function disableSigning(cwd?: string, managed = true): Promise<void> {
+  if (managed) {
+    await unsetConfig('gpg.format', 'local', cwd);
+    await unsetConfig('user.signingKey', 'local', cwd);
+    await unsetConfig('gpg.ssh.program', 'local', cwd);
+  }
+  await unsetConfig('commit.gpgsign', 'local', cwd);
+  if ((await getEffectiveConfig('commit.gpgsign', cwd, 'bool'))?.value === 'true') {
+    await setConfig('commit.gpgsign', 'false', 'local', cwd);
+  }
+}
+
+/**
+ * Toggle commit signing for a repo with an identity's key (the right-click
+ * "Sign Commits with …" / "Stop Signing" actions). Opt-in: `identity use`
+ * never turns signing on by itself; while enabled it re-binds to each newly
+ * applied identity's key. Off always means "this repo does not sign",
+ * whatever global/system config says.
  */
 export async function setCommitSigning(opts: {
   source: Source;
   cwd?: string;
-  id: string;
+  /** required to turn signing on; informational (audit) when turning it off */
+  id?: string;
   on: boolean;
   askpassScriptPath?: string;
-}): Promise<{ signing: boolean; key?: string }> {
+}): Promise<{ signing: boolean; format?: SigningConfig['format']; key?: string }> {
   if (!(await insideWorkTree(opts.cwd))) throw Errors.notARepo(opts.cwd);
   const state = await readState(opts.cwd);
 
   if (!opts.on) {
+    await disableSigning(opts.cwd, state.signing === true);
     state.signing = false;
     await writeState(state, opts.cwd);
-    await unsetConfig('commit.gpgsign', 'local', opts.cwd);
-    await unsetConfig('gpg.format', 'local', opts.cwd);
-    await unsetConfig('user.signingKey', 'local', opts.cwd);
-    await unsetConfig('gpg.ssh.program', 'local', opts.cwd);
     await appendAudit({ action: 'identity.sign', source: opts.source, identity: opts.id, repo: await safeTopLevel(opts.cwd), result: 'ok', message: 'signing off' });
     return { signing: false };
   }
 
+  if (!opts.id) throw Errors.usage('git colabor identity sign <id>');
   const identity = await getIdentity(opts.id);
-  if (!identity.sshKeyPath || !(await keyUsable(identity.sshKeyPath))) {
-    throw Errors.usage(`identity "${identity.name}" has no usable key to sign with`);
-  }
+  const cfg = await writeIdentitySigning(identity, opts.cwd, opts.askpassScriptPath);
+  if (!cfg) throw Errors.usage(`identity "${identity.name}" has no usable SSH or GPG key to sign with`);
   state.signing = true;
   await writeState(state, opts.cwd);
-  await setConfig('commit.gpgsign', 'true', 'local', opts.cwd);
-  await setConfig('gpg.format', 'ssh', 'local', opts.cwd);
-  await setConfig('user.signingKey', await signingKeyPath(identity.sshKeyPath, identity.sshKeyFingerprint), 'local', opts.cwd);
-  if (opts.askpassScriptPath) {
-    const signWrapper = await ensureSignWrapper(opts.askpassScriptPath);
-    await setConfig('gpg.ssh.program', signWrapper, 'local', opts.cwd);
-  }
   await appendAudit({
     action: 'identity.sign',
     source: opts.source,
     identity: opts.id,
     identityName: identity.name,
-    fingerprint: identity.sshKeyFingerprint,
+    fingerprint: cfg.format === 'ssh' ? identity.sshKeyFingerprint : cfg.key,
     repo: await safeTopLevel(opts.cwd),
     result: 'ok',
-    message: 'signing on',
+    message: `signing on (${cfg.format})`,
   });
-  return { signing: true, key: identity.sshKeyPath };
+  return { signing: true, format: cfg.format, key: cfg.key };
+}
+
+/** The EFFECTIVE signing state of a repo — what `git commit` will actually do. */
+export type SigningStatus = {
+  /** effective commit.gpgsign across every scope */
+  enabled: boolean;
+  /** effective user.signingKey (null: OpenPGP then picks a key by committer email) */
+  key: string | null;
+  /** effective gpg.format (git's default is openpgp) */
+  format: string;
+  /** scope commit.gpgsign resolved from (local / global / system / …); null when unset everywhere */
+  scope: string | null;
+  /** the file that value lives in */
+  origin: string | null;
+  /** colabor's own repo-local signing (`identity sign`) is on */
+  managed: boolean;
+  /** OpenPGP only: emails on the signing key, so the UI can flag a key that is not the committer's */
+  keyEmails?: string[];
+};
+
+export async function signingStatus(cwd: string | undefined, managed: boolean): Promise<SigningStatus> {
+  const [sign, format, key] = await Promise.all([
+    getEffectiveConfig('commit.gpgsign', cwd, 'bool'),
+    getEffectiveConfig('gpg.format', cwd),
+    getEffectiveConfig('user.signingKey', cwd),
+  ]);
+  const status: SigningStatus = {
+    enabled: sign?.value === 'true',
+    key: key?.value || null,
+    format: format?.value || 'openpgp',
+    scope: sign?.scope ?? null,
+    origin: sign?.origin ?? null,
+    managed,
+  };
+  if (status.enabled && status.format === 'openpgp' && status.key) {
+    // best effort: no gpg / unknown key just leaves the owner unknown
+    const emails = (await listSigningKeys(cwd, status.key).catch(() => [])).flatMap((k) => k.emails);
+    if (emails.length > 0) status.keyEmails = emails;
+  }
+  return status;
 }
