@@ -82,11 +82,12 @@ Selecting co-authors rewrites the commit template (`commit.template` / `~/.gitme
 | `identity add` | `--name`, `--email` (required); `--key <path>` (import), `--host`, `--default`. |
 | `identity rm <id>` | Remove from the identity map (logs out first, best-effort; imported identities are also hidden from future auto-imports). |
 | `identity import` | Add every distinct **committer** from the repo history as a key-less identity (idempotent, skips hidden emails; driven automatically by the extension on repo open). |
-| `identity set <id>` | Edit in place: `--name <n>`, `--email <e>`, `--key <path>` (re-reference), `--no-key` (clear), `--scope user\|machine\|project`. |
-| `identity sign <id> [--off]` | Opt-in SSH commit signing with the identity's key — writes `commit.gpgsign=true`, `gpg.format=ssh`, `user.signingKey`; `--off` clears them. While on, `identity use` re-binds the signing key to the newly applied identity. |
+| `identity set <id>` | Edit in place: `--name <n>`, `--email <e>`, `--key <path>` (re-reference), `--no-key` (clear), `--scope user\|machine\|project`, `--gpg-key <key>` (bind a secret GPG signing key — fingerprint, key id or email; stored as the fingerprint), `--no-gpg-key` (unbind). |
+| `identity sign <id>` / `identity sign [id] --off` | Opt-in commit signing with the identity's key — its bound GPG key (`gpg.format=openpgp`), else its SSH key (`gpg.format=ssh`) — writes `commit.gpgsign=true`, `gpg.format`, `user.signingKey`. While on, `identity use` re-binds to the newly applied identity's key (no key → off). `--off` drops colabor's keys and, when global/system config would still sign, pins `commit.gpgsign=false` locally — off means this repo does not sign. |
+| `identity gpg-keys` | Secret GPG keys usable for signing (via `gpg.program`, default `gpg`): fingerprint + user ids. |
 | `identity logout [id]` | Remove key from `ssh-agent` — the key file itself is never touched; repo stays configured (use `revert` for that). |
 | `identity revert` | Restore the repo's pre-tool `user.*` / `core.sshCommand` / `commit.template` from the first-touch backup, clear markers. |
-| `identity status` | Per-repo snapshot: active identity, managed markers, `heldBy`, selected + available co-authors. |
+| `identity status` | Per-repo snapshot: active identity, managed markers, `heldBy`, selected + available co-authors, and the **effective** commit signing (`signing`: `enabled`, `format`, `key`, the `scope`/`origin` file `commit.gpgsign` comes from, `managed` when colabor turned it on, and the GPG key's `keyEmails`). |
 | `identity audit` | `--repo <path>`, `--since <date>`, `--tail <n>` filters over the audit log. |
 | `identity doctor` | Self-check: binaries, identity map, key dir, agent, askpass bundle, repo markers. |
 
@@ -132,7 +133,7 @@ This is the contract the VS Code extension consumes.
 
 (Windows: the data dir is `%APPDATA%\git-colabor`.)
 
-Git config keys **written locally** per repo: `user.name`, `user.email`, `core.sshCommand` (only when the identity has a key: `ssh -i <key> -o IdentitiesOnly=yes`), and — with a usable key — SSH commit signing (`commit.gpgsign=true`, `gpg.format=ssh`, `user.signingKey=<key path>`; switched to a key-less identity clears them), `colabor.managed=true`, `colabor.managed-by=cli|ext`, and multi-valued `colabor.selected` (`Name <email>` per co-author). `commit.template` is set **globally** only if unset in any scope.
+Git config keys **written locally** per repo: `user.name`, `user.email`, `core.sshCommand` (only when the identity has a key: `ssh -i <key> -o IdentitiesOnly=yes`), and — after an explicit `identity sign` — commit signing (`commit.gpgsign=true`, `gpg.format=openpgp|ssh`, `user.signingKey=<GPG fingerprint | SSH key path>`; switching to a key-less identity or `--off` clears them and pins `commit.gpgsign=false` when global/system config would still sign), `colabor.managed=true`, `colabor.managed-by=cli|ext`, and multi-valued `colabor.selected` (`Name <email>` per co-author). `commit.template` is set **globally** only if unset in any scope.
 
 ## git-mob compatibility
 

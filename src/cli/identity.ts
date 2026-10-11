@@ -19,11 +19,12 @@ import { historyCommitters } from '../core/git/committers.js';
 import { importKey } from '../core/identity/keys.js';
 import { applyIdentity, applyResolvedIdentity, ensureAskpassWrapper } from '../core/identity/apply.js';
 import { revertRepo } from '../core/identity/revert.js';
-import { setCommitSigning } from '../core/identity/sign.js';
+import { disableSigning, setCommitSigning, signingStatus } from '../core/identity/sign.js';
+import { listSigningKeys } from '../core/identity/gpg.js';
 import { logoutIdentity } from '../core/identity/logout.js';
 import { appendAudit, readAudit } from '../core/logging/audit.js';
 import { agentFingerprints, keyInAgent, listAgent, loadKey, removeKey, verifyKey } from '../core/identity/agent.js';
-import { getConfig, unsetConfig } from '../core/git/config.js';
+import { getConfig } from '../core/git/config.js';
 import { insideWorkTree, topLevel } from '../core/git/rev.js';
 import { readState, writeState } from '../core/repo/state.js';
 import { repoStatus } from '../core/repo/status.js';
@@ -45,7 +46,7 @@ const ADD_SPEC = {
 };
 const AUDIT_SPEC = { valueFlags: ['--repo', '--since', '--tail'] };
 const APPLY_SPEC = { valueFlags: ['--name', '--email', '--ssh-command', '--source'] };
-const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--scope'], boolFlags: ['--no-key'] };
+const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--scope', '--gpg-key'], boolFlags: ['--no-key', '--no-gpg-key'] };
 const SIGN_SPEC = { valueFlags: [], boolFlags: ['--off'] };
 const AGENT_SPEC = { valueFlags: [], boolFlags: ['--remove', '--verify'] };
 
@@ -66,6 +67,7 @@ function identityToJson(i: Identity, defaultId?: string, agentPrints?: Set<strin
     disabled: !!i.disabled,
     scope: i.scope ?? (i.imported ? 'project' : 'machine'),
     remoteKeys: i.remoteKeys,
+    gpgKey: i.gpgKey,
     isDefault: i.id === defaultId,
   };
 }
@@ -94,9 +96,11 @@ export async function dispatch(command: string | undefined, tokens: string[], ct
     case 'import':
       return importFromHistory(ctx);
     case 'set':
-      return setIdentity(parseCommandArgs(tokens, SET_SPEC));
+      return setIdentity(parseCommandArgs(tokens, SET_SPEC), ctx);
     case 'sign':
       return sign(parseCommandArgs(tokens, SIGN_SPEC), ctx);
+    case 'gpg-keys':
+      return gpgKeys(ctx);
     case 'disable':
       return disable(parseCommandArgs(tokens), ctx);
     case 'unhide':
@@ -374,9 +378,13 @@ async function rm(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
  * / --no-key (clear the key reference). Changes land in the machine-level
  * identity store (~/.config/git-colabor/identities.json).
  */
-async function setIdentity(p: CmdParsed): Promise<JsonResult> {
+async function setIdentity(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const id = p.positionals[0];
-  if (!id) throw Errors.usage('git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key');
+  if (!id) {
+    throw Errors.usage(
+      'git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key | --gpg-key <key> | --no-gpg-key',
+    );
+  }
   await getIdentity(id); // validates existence
   const patch: Parameters<typeof updateIdentity>[1] = {};
   const warnings: Warning[] = [];
@@ -406,8 +414,16 @@ async function setIdentity(p: CmdParsed): Promise<JsonResult> {
     }
     patch.scope = s;
   }
+  if (p.bools.has('--no-gpg-key')) patch.gpgKey = undefined;
+  if (p.values['--gpg-key']) {
+    // stored as the primary fingerprint, whatever gpg accepted (key id, email, …)
+    const [key, ...more] = await listSigningKeys(ctx.cwd, p.values['--gpg-key']);
+    if (!key) throw Errors.usage(`no usable secret GPG signing key matches "${p.values['--gpg-key']}"`);
+    if (more.length > 0) throw Errors.usage(`"${p.values['--gpg-key']}" matches several GPG keys — pass a fingerprint`);
+    patch.gpgKey = key.fingerprint;
+  }
   if (Object.keys(patch).length === 0) {
-    throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key');
+    throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key / --gpg-key / --no-gpg-key');
   }
   const next = await updateIdentity(id, patch);
   await appendAudit({
@@ -452,18 +468,24 @@ async function hiddenLs(): Promise<JsonResult> {
   return ok({ hidden: await listHiddenEmails() });
 }
 
-/** Toggle opt-in SSH commit signing for the repo with an identity's key. */
+/** Toggle opt-in commit signing for the repo with an identity's key (GPG if bound, else SSH). */
 async function sign(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const id = p.positionals[0];
-  if (!id) throw Errors.usage('git colabor identity sign <id> [--off]');
+  const on = !p.bools.has('--off');
+  if (!id && on) throw Errors.usage('git colabor identity sign <id> | identity sign [id] --off');
   const r = await setCommitSigning({
     source: 'cli',
     cwd: ctx.cwd,
     id,
-    on: !p.bools.has('--off'),
+    on,
     askpassScriptPath: ctx.askpassScriptPath,
   });
   return ok(r);
+}
+
+/** Secret GPG keys usable for commit signing (for `identity set --gpg-key`). */
+async function gpgKeys(ctx: IdCtx): Promise<JsonResult> {
+  return ok({ keys: await listSigningKeys(ctx.cwd) });
 }
 
 /**
@@ -486,10 +508,7 @@ async function disable(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
       // same as logout: an orphaned signing config fails every commit
       if (state.signing === true) {
         state.signing = false;
-        await unsetConfig('commit.gpgsign', 'local', ctx.cwd);
-        await unsetConfig('gpg.format', 'local', ctx.cwd);
-        await unsetConfig('user.signingKey', 'local', ctx.cwd);
-        await unsetConfig('gpg.ssh.program', 'local', ctx.cwd);
+        await disableSigning(ctx.cwd);
       }
       await writeState(state, ctx.cwd);
       deactivated = true;
@@ -532,7 +551,6 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
   const rs = await repoStatus(ctx.cwd);
   const active = rs.activeIdentityId ? identities.find((i) => i.id === rs.activeIdentityId) : undefined;
   const st = ctx.cwd ? await readState(ctx.cwd) : undefined;
-  const signingKey = await getConfig('user.signingKey', 'local', ctx.cwd);
   const prints = await agentFingerprints();
   // hide outranks every display scope, but the ACTIVE identity survives —
   // it reflects the repo's current configuration, not a display preference
@@ -546,7 +564,8 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
     managed: rs.managed,
     managedBy: rs.managedBy,
     heldBy: rs.heldBy,
-    signing: { enabled: st?.signing === true, key: signingKey ?? null },
+    // what `git commit` will actually do here, and which scope decides it
+    signing: await signingStatus(ctx.cwd, st?.signing === true),
     activeIdentity: active ? identityToJson(active, defaultIdentity, prints) : null,
     identities: rows,
     selected: rs.selected,

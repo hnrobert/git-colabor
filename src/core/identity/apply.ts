@@ -9,10 +9,9 @@ import { appendAudit } from '../logging/audit.js';
 import { keyInAgent } from './agent.js';
 import { getIdentity, updateIdentity } from './map.js';
 import { importKey } from './keys.js';
-import { ensureSignWrapper } from './sign.js';
+import { disableSigning, writeIdentitySigning } from './sign.js';
 import { discoverSessionBridge } from '../secrets/session-bridge.js';
 import { AppError } from '../errors.js';
-import { existsSync } from 'node:fs';
 import type { Identity, Source } from '../types.js';
 
 export type ApplyOpts = {
@@ -92,29 +91,15 @@ export async function applyResolvedIdentity(args: {
   state.heldBy = nowHeldBy(session, opts.source);
   // Commit signing is OPT-IN per repo (right-click toggle → `identity sign`).
   // When enabled, re-bind the signing key to the newly applied identity's
-  // usable key so signatures follow the committer; a key-less identity
-  // cannot sign, so the previous identity's signing config is cleared
-  // (same reasoning as core.sshCommand above). Agent-held keys sign via
-  // their public half (see signingKeyPath in sign.ts). The sign wrapper is
-  // also refreshed (content-compare rewrite) so older wrappers update to the
-  // current layout without a manual sign re-toggle.
-  if (state.signing === true && identity?.sshKeyPath && sshCommand) {
-    await setConfig('commit.gpgsign', 'true', 'local', opts.cwd);
-    await setConfig('gpg.format', 'ssh', 'local', opts.cwd);
-    const pub = `${identity.sshKeyPath}.pub`;
-    const viaAgent = !!identity.sshKeyFingerprint
-      && (await keyInAgent(identity.sshKeyFingerprint))
-      && existsSync(pub);
-    await setConfig('user.signingKey', viaAgent ? pub : identity.sshKeyPath, 'local', opts.cwd);
-    if (opts.askpassScriptPath) {
-      await setConfig('gpg.ssh.program', await ensureSignWrapper(opts.askpassScriptPath), 'local', opts.cwd);
-    }
-  } else if (state.signing === true && identity && !identity.sshKeyPath) {
+  // key (its GPG key, else its SSH key) so signatures follow the committer;
+  // an identity with no key cannot sign, so signing is turned off — really
+  // off, never falling back to another key from global config (same
+  // reasoning as core.sshCommand above). The sign wrapper is also refreshed
+  // (content-compare rewrite) so older wrappers update to the current layout
+  // without a manual sign re-toggle.
+  if (state.signing === true && identity && !(await writeIdentitySigning(identity, opts.cwd, opts.askpassScriptPath))) {
     state.signing = false;
-    await unsetConfig('commit.gpgsign', 'local', opts.cwd);
-    await unsetConfig('gpg.format', 'local', opts.cwd);
-    await unsetConfig('user.signingKey', 'local', opts.cwd);
-    await unsetConfig('gpg.ssh.program', 'local', opts.cwd);
+    await disableSigning(opts.cwd);
   }
   await writeState(state, opts.cwd);
 

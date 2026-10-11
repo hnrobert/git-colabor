@@ -62,7 +62,7 @@ export async function addIdentity(input: NewIdentity): Promise<Identity> {
 /** Patch editable fields of an identity (name/email/key reference). */
 export async function updateIdentity(
   id: string,
-  patch: Partial<Pick<Identity, 'name' | 'email' | 'sshKeyPath' | 'sshKeyFingerprint' | 'sshKeyEncrypted' | 'disabled' | 'scope' | 'remoteKeys'>>,
+  patch: Partial<Pick<Identity, 'name' | 'email' | 'sshKeyPath' | 'sshKeyFingerprint' | 'sshKeyEncrypted' | 'disabled' | 'scope' | 'remoteKeys' | 'gpgKey'>>,
 ): Promise<Identity> {
   const map = await readMap();
   const identity = map.identities[id];
