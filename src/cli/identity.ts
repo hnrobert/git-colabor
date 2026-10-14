@@ -24,7 +24,7 @@ import { listSigningKeys } from '../core/identity/gpg.js';
 import { logoutIdentity } from '../core/identity/logout.js';
 import { appendAudit, readAudit } from '../core/logging/audit.js';
 import { agentFingerprints, keyInAgent, listAgent, loadKey, removeKey, verifyKey } from '../core/identity/agent.js';
-import { getConfig } from '../core/git/config.js';
+import { getConfig, getEffectiveConfig } from '../core/git/config.js';
 import { insideWorkTree, topLevel } from '../core/git/rev.js';
 import { readState, writeState } from '../core/repo/state.js';
 import { repoStatus } from '../core/repo/status.js';
@@ -558,6 +558,18 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
   const rows = identities
     .filter((i) => i.id === rs.activeIdentityId || !hidden.has(i.email.toLowerCase()))
     .map((i) => ({ ...identityToJson(i, defaultIdentity, prints), active: i.id === rs.activeIdentityId }));
+  // the picked identity straight from git config when colabor manages none —
+  // the tree shows it as the active row so an out-of-band `git config` switch
+  // is visible without adopting it
+  let configIdentity: { name: string; email: string } | null = null;
+  if (!active && rs.inRepo) {
+    const [n, e] = await Promise.all([
+      getEffectiveConfig('user.name', ctx.cwd),
+      getEffectiveConfig('user.email', ctx.cwd),
+    ]);
+    if (n?.value && e?.value) configIdentity = { name: n.value, email: e.value };
+  }
+
   return ok({
     repo: rs.repo,
     inRepo: rs.inRepo,
@@ -567,6 +579,7 @@ async function status(ctx: IdCtx): Promise<JsonResult> {
     // what `git commit` will actually do here, and which scope decides it
     signing: await signingStatus(ctx.cwd, st?.signing === true),
     activeIdentity: active ? identityToJson(active, defaultIdentity, prints) : null,
+    configIdentity,
     identities: rows,
     selected: rs.selected,
     available: rs.available,
