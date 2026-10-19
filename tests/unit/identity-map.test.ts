@@ -3,8 +3,8 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  identityId,
   addIdentity,
-  genId,
   getIdentity,
   listIdentities,
   readMap,
@@ -28,8 +28,10 @@ afterEach(async () => {
 });
 
 describe('identity map', () => {
-  it('genId is prefixed + 8 hex', () => {
-    expect(genId()).toMatch(/^id_[0-9a-f]{8}$/);
+  it('identityId is deterministic (name+email hash)', () => {
+    expect(identityId('Alice', 'a@x.io')).toBe(identityId('Alice', 'a@x.io'));
+    expect(identityId('Alice', 'a@x.io')).not.toBe(identityId('Alice', 'b@x.io'));
+    expect(identityId('Alice', 'a@x.io')).toMatch(/^id_[0-9a-f]{12}$/);
   });
 
   it('add + get round-trips', async () => {

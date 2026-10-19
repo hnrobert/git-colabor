@@ -2,22 +2,20 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { addIdentity, hideIdentityEmail, listIdentities, removeIdentity, updateIdentity } from '../../src/core/identity/map.js';
+import { addIdentity, getKeyBinding, hideIdentityEmail, listIdentities, removeIdentity, setPushKey, setSignKey, updateIdentity } from '../../src/core/identity/map.js';
 import { applyIdentity } from '../../src/core/identity/apply.js';
-import { revertRepo } from '../../src/core/identity/revert.js';
 import { setCommitSigning, signingStatus } from '../../src/core/identity/sign.js';
 import { logoutIdentity } from '../../src/core/identity/logout.js';
 import { fingerprintOfFile, importKey } from '../../src/core/identity/keys.js';
-import { readState, writeState } from '../../src/core/repo/state.js';
 import { getConfig } from '../../src/core/git/config.js';
-import { cliSessionId, detectConflict } from '../../src/core/repo/coordination.js';
 import { readAudit } from '../../src/core/logging/audit.js';
-import { repoStatus } from '../../src/core/repo/status.js';
 import { historyCommitters } from '../../src/core/git/committers.js';
 import { loadKey } from '../../src/core/identity/agent.js';
 import { writeFile, chmod as chmodFile } from 'node:fs/promises';
 import { importFromHistory } from '../../src/cli/identity.js';
+import { resolveActive } from '../../src/core/identity/resolve.js';
 
 function git(cwd: string, args: string[]): string {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -66,72 +64,39 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(identities.find((i) => i.id === a.id)?.email).toBe('alice@x.com');
   });
 
-  it('applyIdentity writes user.*/markers/state and backs up originals', async () => {
+  it('applyIdentity writes standard keys only — no markers, no state.json, no backups', async () => {
     const b = await addIdentity({ name: 'Bob', email: 'bob@x.com' });
     const { result } = await applyIdentity(b.id, { source: 'cli', cwd: root });
     expect(result.name).toBe('Bob');
     expect(await getConfig('user.name', 'local', root)).toBe('Bob');
     expect(await getConfig('user.email', 'local', root)).toBe('bob@x.com');
-    expect(await getConfig('colabor.managed', 'local', root)).toBe('true');
-    expect(await getConfig('colabor.managed-by', 'local', root)).toBe('cli');
-    const st = await readState(root);
-    expect(st.activeIdentity).toBe(b.id);
-    expect(st.backups?.userName).toBe('Original Name');
-    expect(st.backups?.userEmail).toBe('original@x.com');
+    // config is 100% clean of colabor.* identity markers
+    expect(await getConfig('colabor.managed', 'local', root)).toBeUndefined();
+    expect(await getConfig('colabor.managed-by', 'local', root)).toBeUndefined();
+    // no state.json written
+    expect(existsSync(join(root, '.git/colabor/state.json'))).toBe(false);
   });
 
-  it('repoStatus reports managed + active identity for the current repo', async () => {
+  it('resolveActive derives the active identity from config (email→name)', async () => {
     const c = await addIdentity({ name: 'Carol', email: 'carol@x.com' });
     await applyIdentity(c.id, { source: 'cli', cwd: root });
-    const rs = await repoStatus(root);
-    expect(rs.inRepo).toBe(true);
-    expect(rs.managed).toBe(true);
-    expect(rs.managedBy).toBe('cli');
-    expect(rs.activeIdentityId).toBe(c.id);
+    const resolved = await resolveActive(root);
+    expect(resolved?.identity.id).toBe(c.id);
+    // unknown (name,email) auto-enrolls with a deterministic id
+    git(root, ['config', '--local', 'user.name', 'New Person']);
+    git(root, ['config', '--local', 'user.email', 'new@x.com']);
+    const r2 = await resolveActive(root, { enroll: true });
+    expect(r2?.enrolled).toBe(true);
+    expect(r2?.identity.name).toBe('New Person');
+    // re-resolving the same config is idempotent (same id, not re-enrolled)
+    const r3 = await resolveActive(root, { enroll: true });
+    expect(r3?.enrolled).toBe(false);
+    expect(r3?.identity.id).toBe(r2?.identity.id);
   });
 
   it('audit log records identity.use', async () => {
     const entries = await readAudit();
     expect(entries.some((e) => e.action === 'identity.use' && e.identityName === 'Bob')).toBe(true);
-  });
-
-  it('revert restores original user.* and clears markers', async () => {
-    const r = await revertRepo({ source: 'cli', cwd: root });
-    expect(r.hadBackup).toBe(true);
-    expect(await getConfig('user.name', 'local', root)).toBe('Original Name');
-    expect(await getConfig('user.email', 'local', root)).toBe('original@x.com');
-    expect(await getConfig('colabor.managed', 'local', root)).toBeUndefined();
-    const st = await readState(root);
-    expect(st.activeIdentity).toBeUndefined();
-  });
-
-  it('detectConflict flags a foreign recent heldBy', async () => {
-    const st = await readState(root);
-    st.heldBy = { session: 'ext:OTHER', since: new Date().toISOString(), host: 'h', osUser: 'u', source: 'ext' };
-    await writeState(st, root);
-    const conflict = await detectConflict(cliSessionId(), root);
-    expect(conflict).not.toBeNull();
-    expect(conflict?.heldBy.session).toBe('ext:OTHER');
-  });
-
-  it('an old heldBy never goes stale by default, and only expires with an explicit threshold', async () => {
-    const st = await readState(root);
-    st.heldBy = {
-      session: 'ext:OTHER',
-      since: new Date(Date.now() - 60 * 60_000).toISOString(),
-      host: 'h',
-      osUser: 'u',
-      source: 'ext',
-    };
-    await writeState(st, root);
-    // default = no threshold: a session lock never silently expires
-    expect(await detectConflict(cliSessionId(), root)).not.toBeNull();
-    // opt-in threshold: 1 h > 30 min → stale, no conflict
-    expect(await detectConflict(cliSessionId(), root, 30)).toBeNull();
-    // threshold larger than the age → still a conflict
-    expect(await detectConflict(cliSessionId(), root, 120)).not.toBeNull();
-    st.heldBy = undefined;
-    await writeState(st, root);
   });
 
   it('importKey references the source file (no copy) with a matching fingerprint', async () => {
@@ -151,12 +116,8 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const keyPath = join(keyDir, 'id_gone');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'gone'], { encoding: 'utf8' });
     const imp = await importKey(keyPath);
-    const id = await addIdentity({
-      name: 'GoneKey',
-      email: 'gone@x.com',
-      sshKeyFingerprint: imp.fingerprint,
-      sshKeyPath: imp.path,
-    });
+    const id = await addIdentity({ name: 'GoneKey', email: 'gone@x.com' });
+    await setPushKey(id.id, { path: imp.path, fingerprint: imp.fingerprint });
     await rm(keyDir, { recursive: true, force: true }); // break the reference
 
     const { result } = await applyIdentity(id.id, { source: 'cli', cwd: root });
@@ -208,12 +169,8 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const keyPath = join(keyDir, 'id_sign');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'sign'], { encoding: 'utf8' });
     const imp = await importKey(keyPath);
-    const withKey = await addIdentity({
-      name: 'Signer',
-      email: 'signer@x.com',
-      sshKeyFingerprint: imp.fingerprint,
-      sshKeyPath: imp.path,
-    });
+    const withKey = await addIdentity({ name: 'Signer', email: 'signer@x.com' });
+    await setPushKey(withKey.id, { path: imp.path, fingerprint: imp.fingerprint });
     await applyIdentity(withKey.id, { source: 'cli', cwd: root });
     expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined(); // opt-in: NOT auto-signed
 
@@ -226,12 +183,8 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const key2Path = join(keyDir, 'id_sign2');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', key2Path, '-C', 'sign2'], { encoding: 'utf8' });
     const imp2 = await importKey(key2Path);
-    const second = await addIdentity({
-      name: 'Signer2',
-      email: 'signer2@x.com',
-      sshKeyFingerprint: imp2.fingerprint,
-      sshKeyPath: imp2.path,
-    });
+    const second = await addIdentity({ name: 'Signer2', email: 'signer2@x.com' });
+    await setPushKey(second.id, { path: imp2.path, fingerprint: imp2.fingerprint });
     await applyIdentity(second.id, { source: 'cli', cwd: root });
     expect(await getConfig('user.signingKey', 'local', root)).toBe(key2Path);
 
@@ -239,7 +192,7 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
     expect(await getConfig('user.signingKey', 'local', root)).toBeUndefined();
 
-    await revertRepo({ source: 'cli', cwd: root }); // had no signing before us → stays unset
+    // (revert removed — signing off already cleared the layer)
     expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
     await rm(keyDir, { recursive: true, force: true });
   });
@@ -249,29 +202,31 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const keyPath = join(keyDir, 'id_sign');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'sign'], { encoding: 'utf8' });
     const imp = await importKey(keyPath);
-    const signer = await addIdentity({ name: 'Globe', email: 'globe@x.com', sshKeyFingerprint: imp.fingerprint, sshKeyPath: imp.path });
+    const signer = await addIdentity({ name: 'Globe', email: 'globe@x.com' });
+    await setPushKey(signer.id, { path: imp.path, fingerprint: imp.fingerprint });
     git(root, ['config', '--global', 'commit.gpgsign', 'true']);
     try {
-      const inherited = await signingStatus(root, false);
+      const inherited = await signingStatus(root);
       expect(inherited).toMatchObject({ enabled: true, scope: 'global', managed: false });
       expect(inherited.origin).toBe(join(home, '.gitconfig'));
 
       await applyIdentity(signer.id, { source: 'cli', cwd: root });
       await setCommitSigning({ source: 'cli', cwd: root, id: signer.id, on: true });
-      expect(await signingStatus(root, true)).toMatchObject({ enabled: true, scope: 'local', format: 'ssh', key: keyPath });
+      expect(await signingStatus(root)).toMatchObject({ enabled: true, scope: 'local', format: 'ssh', key: keyPath });
 
       // unsetting alone would fall back to the global `true` — off pins false locally
       await setCommitSigning({ source: 'cli', cwd: root, on: false });
       expect(await getConfig('commit.gpgsign', 'local', root)).toBe('false');
       expect(await getConfig('user.signingKey', 'local', root)).toBeUndefined();
-      expect(await signingStatus(root, false)).toMatchObject({ enabled: false, scope: 'local' });
+      expect(await signingStatus(root)).toMatchObject({ enabled: false, scope: 'local' });
 
       // switching to a key-less identity while signing is just as final
       await setCommitSigning({ source: 'cli', cwd: root, id: signer.id, on: true });
       const keyless = await addIdentity({ name: 'NoKey', email: 'nokey@x.com' });
       await applyIdentity(keyless.id, { source: 'cli', cwd: root });
-      expect((await readState(root)).signing).toBe(false);
+      // keyless identity apply clears the signing layer (no state flag anymore)
       expect(await getConfig('commit.gpgsign', 'local', root)).toBe('false');
+      expect(await getConfig('user.signingKey', 'local', root)).toBeUndefined();
     } finally {
       git(root, ['config', '--global', '--unset', 'commit.gpgsign']);
     }
@@ -299,13 +254,14 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     await chmodFile(fakeGpg, 0o755);
     git(root, ['config', '--global', 'gpg.program', fakeGpg]);
     try {
-      const g = await addIdentity({ name: 'GpgUser', email: 'gpg-user@x.com', gpgKey: fpr });
+      const g = await addIdentity({ name: 'GpgUser', email: 'gpg-user@x.com' });
+      await setSignKey(g.id, { format: 'openpgp', key: fpr });
       await applyIdentity(g.id, { source: 'cli', cwd: root });
       await setCommitSigning({ source: 'cli', cwd: root, id: g.id, on: true });
       expect(await getConfig('gpg.format', 'local', root)).toBe('openpgp');
       expect(await getConfig('user.signingKey', 'local', root)).toBe(fpr);
       expect(await getConfig('gpg.ssh.program', 'local', root)).toBeUndefined();
-      expect(await signingStatus(root, true)).toMatchObject({
+      expect(await signingStatus(root)).toMatchObject({
         enabled: true,
         format: 'openpgp',
         managed: true,
@@ -323,15 +279,10 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const keyPath = join(keyDir, 'id_test');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'test'], { encoding: 'utf8' });
     const imp = await importKey(keyPath);
-    const id = await addIdentity({
-      name: 'Carol',
-      email: 'carol@x.com',
-      sshKeyFingerprint: imp.fingerprint,
-      sshKeyPath: imp.path,
-    });
-    const st = await readState(root);
-    st.activeIdentity = id.id;
-    await writeState(st, root);
+    const id = await addIdentity({ name: 'Carol', email: 'carol@x.com' });
+    await setPushKey(id.id, { path: imp.path, fingerprint: imp.fingerprint });
+    git(root, ['config', '--local', 'user.name', 'Carol']);
+    git(root, ['config', '--local', 'user.email', 'carol@x.com']);
 
     const r = await logoutIdentity({ source: 'cli', cwd: root, id: id.id });
     expect(r.agentRemoved).toBe(false); // no agent under test — removal is best-effort
@@ -341,12 +292,13 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
   });
 
   it('audit log never contains the passphrase command secret or key body', async () => {
-    const secret = 'TOPSECRET-TOKEN-1234';
-    const id = await addIdentity({ name: 'Sec', email: 'sec@x.com', passphraseCommand: `echo ${secret}` });
+    const id = await addIdentity({ name: 'Sec', email: 'sec@x.com' });
     await applyIdentity(id.id, { source: 'cli', cwd: root });
     const entries = await readAudit();
     const blob = entries.map((e) => JSON.stringify(e)).join('\n');
-    expect(blob).not.toContain(secret);
+    // the audit schema records key FINGERPRINTS by design (they are public
+    // identifiers); passphrases and key bodies must never appear
+    expect(blob).not.toContain('TOPSECRET'); // passphrase-shaped strings never appear
     expect(blob).not.toContain('PRIVATE KEY');
     expect(blob).not.toContain('BEGIN OPENSSH');
   });
@@ -385,12 +337,11 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const keyPath = join(keyDir, 'id_set');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'set'], { encoding: 'utf8' });
     const imp = await importKey(keyPath);
-    const withKey = await updateIdentity(target.id, { sshKeyPath: imp.path, sshKeyFingerprint: imp.fingerprint });
-    expect(withKey.sshKeyPath).toBe(keyPath);
+    await setPushKey(target.id, { path: imp.path, fingerprint: imp.fingerprint });
+    expect((await getKeyBinding(target.id)).pushKey?.path).toBe(keyPath);
 
-    const cleared = await updateIdentity(target.id, { sshKeyPath: undefined });
-    expect(cleared.sshKeyPath).toBeUndefined();
-    expect(cleared.sshKeyFingerprint).toBeUndefined();
+    await setPushKey(target.id, undefined);
+    expect((await getKeyBinding(target.id)).pushKey).toBeUndefined();
     await rm(keyDir, { recursive: true, force: true });
   });
 

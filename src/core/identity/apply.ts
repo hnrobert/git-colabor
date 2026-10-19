@@ -3,24 +3,19 @@ import { join } from 'node:path';
 import { setConfig, unsetConfig } from '../git/config.js';
 import { dataDir } from '../paths.js';
 import { topLevel } from '../git/rev.js';
-import { captureBackupIfFirstTouch, readState, writeState } from '../repo/state.js';
-import { detectConflict, nowHeldBy, cliSessionId, type ConflictInfo } from '../repo/coordination.js';
 import { appendAudit } from '../logging/audit.js';
 import { keyInAgent } from './agent.js';
-import { getIdentity, updateIdentity } from './map.js';
-import { importKey } from './keys.js';
+import { getIdentity, getKeyBinding, setPushKey } from './map.js';
+import { keyUsable, fingerprintOfFile } from './keys.js';
 import { disableSigning, writeIdentitySigning } from './sign.js';
 import { discoverSessionBridge } from '../secrets/session-bridge.js';
-import { AppError } from '../errors.js';
+import { getConfig } from '../git/config.js';
 import type { Identity, Source } from '../types.js';
 
 export type ApplyOpts = {
   source: Source;
   cwd?: string;
-  session?: string;
-  staleMinutes?: number;
-  noOverride?: boolean;
-  /** askpass/agent (only relevant when the identity has a key) */
+  /** askpass bridge (push-time passphrase delivery) */
   askpassScriptPath?: string;
   socketPath?: string;
   token?: string;
@@ -30,13 +25,14 @@ export type ApplyResult = {
   name: string;
   email: string;
   sshCommand?: string;
-  conflict: ConflictInfo | null;
-  /** is the identity's key fingerprint currently held by ssh-agent (undefined when no key) */
-  agent?: { inAgent: boolean };
-  /** the askpass prefix was baked into core.sshCommand (a bridge session exists) */
-  bridgeUsed?: boolean;
-  /** the referenced key file was missing/unreadable — applied without a key */
+  /** did the push key actually make it into the apply (false = degraded)? */
+  keyApplied: boolean;
+  /** key preferred but the file was missing/unreadable */
   keyMissing?: boolean;
+  /** key preferred but no passphrase could be obtained at apply time */
+  keyDegraded?: boolean;
+  /** is the push key fingerprint currently held by ssh-agent */
+  agent?: { inAgent: boolean };
 };
 
 async function safeTopLevel(cwd?: string): Promise<string | undefined> {
@@ -48,9 +44,11 @@ async function safeTopLevel(cwd?: string): Promise<string | undefined> {
 }
 
 /**
- * The single writer: write repo-local user.name / user.email / core.sshCommand, set markers,
- * capture backup on first touch, record heldBy, report agent presence, audit. Keys are NEVER
- * auto-loaded into ssh-agent here — loading is an explicit manual action (`identity agent`).
+ * The single writer: repo-local STANDARD git keys only — user.name /
+ * user.email / core.sshCommand / signing keys. No colabor.* markers, no
+ * state.json, no backups, no session locks: the repo reads as if a human
+ * configured it, and the active identity is derived from config at status
+ * time (see resolve.ts).
  */
 export async function applyResolvedIdentity(args: {
   name: string;
@@ -60,54 +58,25 @@ export async function applyResolvedIdentity(args: {
   opts: ApplyOpts;
 }): Promise<ApplyResult> {
   const { name, email, sshCommand, identity, opts } = args;
-  const session = opts.session ?? (opts.source === 'cli' ? cliSessionId() : 'ext:unknown');
 
-  const conflict = await detectConflict(session, opts.cwd, opts.staleMinutes);
-  if (conflict && opts.noOverride) {
-    throw new AppError({
-      code: 'CONFLICT_BLOCKED',
-      message: `repo is held by ${conflict.heldBy.session} (since ${conflict.heldBy.since})`,
-      exitCode: 6,
-      hints: ['re-run without --no-override to take over'],
-    });
-  }
-
-  await captureBackupIfFirstTouch(opts.cwd);
   await setConfig('user.name', name, 'local', opts.cwd);
   await setConfig('user.email', email, 'local', opts.cwd);
   if (sshCommand) {
     await setConfig('core.sshCommand', sshCommand, 'local', opts.cwd);
-  } else if (identity && !identity.sshKeyPath) {
-    // a key-less identity must not keep pushing with the PREVIOUS identity's
-    // key — an encrypted leftover key is exactly what triggers passphrase
-    // prompts while the current identity owns none
+  } else if (identity) {
+    // no key in effect — a leftover key from a previous identity is exactly
+    // what triggers stray passphrase prompts; clear it
     await unsetConfig('core.sshCommand', 'local', opts.cwd);
+    // signing follows the identity: no key to sign with → really off
+    const gpgsign = await getConfig('commit.gpgsign', 'local', opts.cwd);
+    if (gpgsign === 'true') await disableSigning(opts.cwd);
   }
-  await setConfig('colabor.managed', 'true', 'local', opts.cwd);
-  await setConfig('colabor.managed-by', opts.source, 'local', opts.cwd);
 
-  const state = await readState(opts.cwd);
-  state.activeIdentity = identity?.id;
-  state.heldBy = nowHeldBy(session, opts.source);
-  // Commit signing is OPT-IN per repo (right-click toggle → `identity sign`).
-  // When enabled, re-bind the signing key to the newly applied identity's
-  // key (its GPG key, else its SSH key) so signatures follow the committer;
-  // an identity with no key cannot sign, so signing is turned off — really
-  // off, never falling back to another key from global config (same
-  // reasoning as core.sshCommand above). The sign wrapper is also refreshed
-  // (content-compare rewrite) so older wrappers update to the current layout
-  // without a manual sign re-toggle.
-  if (state.signing === true && identity && !(await writeIdentitySigning(identity, opts.cwd, opts.askpassScriptPath))) {
-    state.signing = false;
-    await disableSigning(opts.cwd);
-  }
-  await writeState(state, opts.cwd);
-
-  // report-only: is the key already in the agent? (never auto-load — loading
-  // is the explicit `identity agent` command)
+  // report-only: is the push key already in the agent?
+  const binding = identity ? await getKeyBinding(identity.id) : undefined;
   let agent: ApplyResult['agent'];
-  if (identity?.sshKeyFingerprint) {
-    agent = { inAgent: await keyInAgent(identity.sshKeyFingerprint) };
+  if (binding?.pushKey) {
+    agent = { inAgent: await keyInAgent(binding.pushKey.fingerprint) };
   }
 
   await appendAudit({
@@ -115,27 +84,16 @@ export async function applyResolvedIdentity(args: {
     source: opts.source,
     identity: identity?.id,
     identityName: identity?.name ?? name,
-    fingerprint: identity?.sshKeyFingerprint,
+    fingerprint: binding?.pushKey?.fingerprint,
     repo: await safeTopLevel(opts.cwd),
-    result: conflict ? 'warn' : 'ok',
-    message: conflict ? `overrode ${conflict.heldBy.session}` : undefined,
   });
 
-  return { name, email, sshCommand, conflict, agent };
+  return { name, email, sshCommand, keyApplied: !!sshCommand, agent };
 }
 
 /**
- * The `core.sshCommand` for a key. When driven by the extension (askpass
- * bundle known), bake the SSH_ASKPASS prefix into the command so push/fetch
- * over this key gets its passphrase from the extension's session store even
- * with no tty and no ssh-agent — git runs core.sshCommand through a shell,
- * so the env assignment prefix is honored. Plain CLI use (no bundle) keeps
- * the bare ssh command.
- *
- * ssh execve()s the SSH_ASKPASS path, so the .cjs bundle needs an executable
- * wrapper that re-execs it with the running node (the VS Code Server's node
- * on remote hosts — not necessarily on PATH). The wrapper is written to the
- * data dir (idempotent) and used as the SSH_ASKPASS value.
+ * The executable SSH_ASKPASS wrapper around the bundled askpass.cjs.
+ * Content-compared, idempotent.
  */
 export async function ensureAskpassWrapper(askpassScriptPath: string): Promise<string> {
   const wrapperPath = join(dataDir(), 'askpass-wrapper.sh');
@@ -147,55 +105,43 @@ export async function ensureAskpassWrapper(askpassScriptPath: string): Promise<s
     // not there yet — write below
   }
   await writeFile(wrapperPath, content, { mode: 0o700 });
-  await chmod(wrapperPath, 0o700); // existing file keeps its old mode
+  await chmod(wrapperPath, 0o700);
   return wrapperPath;
 }
 
 /**
- * Resolve an identity from the map, then apply it. `asName`/`asEmail` override the committer
- * name/email (used by the extension reconcile path where the VS Code setting wins).
+ * Resolve an identity, then apply it. The push key is a PREFERENCE from the
+ * bindings table — applied best-effort: file missing or passphrase
+ * unavailable → degraded apply (identity switches, key does not).
  */
 export async function applyIdentity(
   id: string,
   opts: ApplyOpts & { asName?: string; asEmail?: string },
 ): Promise<{ identity: Identity; result: ApplyResult }> {
-  let identity = await getIdentity(id);
+  const identity = await getIdentity(id);
+  const binding = await getKeyBinding(id);
+  const push = binding.pushKey;
+
   let sshCommand: string | undefined;
-  let bridgeUsed = false;
   let keyMissing = false;
-  if (identity.sshKeyPath) {
-    // Reference mode: the key lives wherever the user put it. A broken
-    // reference (moved/renamed/deleted) degrades to a key-less apply —
-    // name/email still switch, no core.sshCommand is written, agent load skipped.
-    let imp: Awaited<ReturnType<typeof importKey>> | undefined;
-    try {
-      imp = await importKey(identity.sshKeyPath); // parse = usability check
-    } catch {
-      imp = undefined;
-    }
-    if (imp) {
-      // Self-heal derived fields: the PATH is the source of truth, fingerprint
-      // and the encryption flag are derived from the file. Legacy rows created
-      // before sshKeyEncrypted existed — and keys attached via the old
-      // `identity set --key` (which skipped the flag) — carry a stale flag;
-      // a replaced key file also rotates the fingerprint. Heal on use so the
-      // passphrase prompt and the agent fingerprint match see reality.
-      if (imp.fingerprint !== identity.sshKeyFingerprint || imp.encrypted !== !!identity.sshKeyEncrypted) {
-        await updateIdentity(id, { sshKeyFingerprint: imp.fingerprint, sshKeyEncrypted: imp.encrypted });
-        identity = { ...identity, sshKeyFingerprint: imp.fingerprint, sshKeyEncrypted: imp.encrypted };
+  const keyDegraded = false;
+
+  if (push) {
+    if (await keyUsable(push.path)) {
+      // self-heal the derived fingerprint (file may have been rotated)
+      const fp = await fingerprintOfFile(push.path).catch(() => undefined);
+      if (fp && fp !== push.fingerprint) {
+        await setPushKey(id, { ...push, fingerprint: fp });
+        push.fingerprint = fp;
       }
-      const bare = `ssh -i ${identity.sshKeyPath} -o IdentitiesOnly=yes`;
-      // Bake the SSH_ASKPASS prefix only when the extension bridge is actually
-      // reachable (env socket or a live session file). SSH_ASKPASS_REQUIRE=force
-      // kills ssh's tty fallback, so baking it with no bridge behind would turn
-      // every push into "no passphrase available" for pure-CLI users — they get
-      // the bare command instead: ssh-agent if the key is loaded, else a per-
-      // operation passphrase prompt on the tty.
+      const bare = `ssh -i ${push.path} -o IdentitiesOnly=yes`;
+      // Bake the SSH_ASKPASS prefix only when the extension bridge is
+      // reachable; REQUIRE=force kills the tty fallback, so a bare bridge-less
+      // bake would break every push for pure-CLI users
       const bridge = (opts.socketPath && opts.token) || discoverSessionBridge();
       if (opts.askpassScriptPath && bridge) {
         const wrapper = await ensureAskpassWrapper(opts.askpassScriptPath);
         sshCommand = `SSH_ASKPASS="${wrapper}" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 ${bare}`;
-        bridgeUsed = true;
       } else {
         sshCommand = bare;
       }
@@ -203,14 +149,25 @@ export async function applyIdentity(
       keyMissing = true;
     }
   }
+
   const result = await applyResolvedIdentity({
     name: opts.asName ?? identity.name,
     email: opts.asEmail ?? identity.email,
     sshCommand,
-    identity: keyMissing ? { ...identity, sshKeyPath: undefined } : identity,
+    identity,
     opts,
   });
   result.keyMissing = keyMissing;
-  result.bridgeUsed = bridgeUsed;
+  result.keyDegraded = keyDegraded;
+
+  // signing re-bind: when the repo signs, point it at this identity's sign key
+  if (identity) {
+    const gpgsign = await getConfig('commit.gpgsign', 'local', opts.cwd);
+    if (gpgsign === 'true') {
+      const okSign = await writeIdentitySigning(identity, opts.cwd, opts.askpassScriptPath);
+      if (!okSign) await disableSigning(opts.cwd);
+    }
+  }
+
   return { identity, result };
 }

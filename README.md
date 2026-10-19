@@ -86,7 +86,6 @@ Selecting co-authors rewrites the commit template (`commit.template` / `~/.gitme
 | `identity sign <id>` / `identity sign [id] --off` | Opt-in commit signing with the identity's key — its bound GPG key (`gpg.format=openpgp`), else its SSH key (`gpg.format=ssh`) — writes `commit.gpgsign=true`, `gpg.format`, `user.signingKey`. While on, `identity use` re-binds to the newly applied identity's key (no key → off). `--off` drops colabor's keys and, when global/system config would still sign, pins `commit.gpgsign=false` locally — off means this repo does not sign. |
 | `identity gpg-keys` | Secret GPG keys usable for signing (via `gpg.program`, default `gpg`): fingerprint + user ids. |
 | `identity logout [id]` | Remove key from `ssh-agent` — the key file itself is never touched; repo stays configured (use `revert` for that). |
-| `identity revert` | Restore the repo's pre-tool `user.*` / `core.sshCommand` / `commit.template` from the first-touch backup, clear markers. |
 | `identity status` | Per-repo snapshot: active identity, managed markers, `heldBy`, selected + available co-authors, and the **effective** commit signing (`signing`: `enabled`, `format`, `key`, the `scope`/`origin` file `commit.gpgsign` comes from, `managed` when colabor turned it on, and the GPG key's `keyEmails`). |
 | `identity audit` | `--repo <path>`, `--since <date>`, `--tail <n>` filters over the audit log. |
 | `identity doctor` | Self-check: binaries, identity map, key dir, agent, askpass bundle, repo markers. |

@@ -40,7 +40,7 @@ export async function readCurrentIdentityConfig(cwd?: string): Promise<Backups> 
 
 /**
  * On the tool's first touch of a repo (no `colabor.managed` marker AND no recorded backup),
- * capture the current `user.*`/`core.sshCommand`/`commit.template` so `revert` can restore them.
+ * capture the current `user.*`/`core.sshCommand`/`commit.template` (unused by the new architecture — see configClear).
  */
 export async function captureBackupIfFirstTouch(cwd?: string): Promise<RepoState> {
   const managed = await getConfig('colabor.managed', 'local', cwd);

@@ -1,12 +1,13 @@
 import { readFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { Errors } from '../errors.js';
 import { mapPath } from '../paths.js';
 import { atomicWriteJson } from '../io.js';
-import type { Identity, IdentityMap } from '../types.js';
+import type { Identity, IdentityMap, KeyBinding, SshKeyRef, SignKeyRef } from '../types.js';
 
-export function genId(): string {
-  return 'id_' + randomBytes(4).toString('hex');
+/** Deterministic identity id: stable across key changes and re-adding (idempotent auto-enroll). */
+export function identityId(name: string, email: string): string {
+  return 'id_' + createHash('sha256').update(`${name}\n${email}`).digest('hex').slice(0, 12);
 }
 
 export async function readMap(): Promise<IdentityMap> {
@@ -14,21 +15,54 @@ export async function readMap(): Promise<IdentityMap> {
     const txt = await readFile(mapPath(), 'utf8');
     const parsed = JSON.parse(txt) as Partial<IdentityMap>;
     const identities = { ...parsed.identities };
+    const keyBindings: Record<string, KeyBinding> = { ...(parsed.keyBindings ?? {}) };
     for (const id of Object.keys(identities)) {
-      const row = identities[id] as { passphraseCommand?: string; scope?: string };
-      // strip the removed passphraseCommand field so stale entries vanish on next write
+      const row = identities[id] as Identity & {
+        // legacy fields (pre keyBindings) — migrated below
+        sshKeyPath?: string;
+        sshKeyFingerprint?: string;
+        sshKeyEncrypted?: boolean;
+        gpgKey?: string;
+        passphraseCommand?: string;
+        disabled?: boolean;
+        remoteKeys?: Record<string, string>;
+        scope?: string;
+      };
+      // migrate the single-slot key into the bindings table (once)
+      if (row.sshKeyPath && row.sshKeyFingerprint && !keyBindings[id]?.pushKey) {
+        const ref: SshKeyRef = { path: row.sshKeyPath, fingerprint: row.sshKeyFingerprint };
+        if (row.sshKeyEncrypted) ref.encrypted = true;
+        const existing = keyBindings[id] ?? {};
+        keyBindings[id] = { ...existing, pushKey: ref };
+      }
+      if (row.gpgKey && !keyBindings[id]?.signKey) {
+        const existing = keyBindings[id] ?? {};
+        keyBindings[id] = { ...existing, signKey: { format: 'openpgp', key: row.gpgKey } };
+      }
+      // strip legacy fields so they vanish on next write
+      delete row.sshKeyPath;
+      delete row.sshKeyFingerprint;
+      delete row.sshKeyEncrypted;
+      delete row.gpgKey;
       delete row.passphraseCommand;
-      // 'user'/'vscode' were pre-cleanup spellings of a scope this store never
-      // really had — rows tagged so were ordinary machine-store residents
-      // (the "vscode memory" is the extension's settings layer, not this file)
-      if (row.scope === 'user' || row.scope === 'vscode') row.scope = 'machine';
+      delete row.disabled;
+      delete row.remoteKeys;
+      const legacyScope = row.scope as string | undefined;
+      if (legacyScope === 'user' || legacyScope === 'vscode') row.scope = 'machine';
     }
-    return {
+    const migrated = {
       schemaVersion: 1,
       identities,
+      keyBindings,
       defaultIdentity: parsed.defaultIdentity,
       hidden: parsed.hidden,
-    };
+    } satisfies IdentityMap;
+    // persist the migration immediately so a read-only command (ls/status)
+    // still lands the new keyBindings on disk
+    if (JSON.stringify(parsed) !== JSON.stringify(migrated)) {
+      await writeMap(migrated);
+    }
+    return migrated;
   } catch {
     return { schemaVersion: 1, identities: {} };
   }
@@ -45,13 +79,21 @@ export async function getIdentity(id: string): Promise<Identity> {
   return found;
 }
 
+/** Find an identity by (name, email) — the uniqueness key. */
+export async function findIdentity(name: string, email: string): Promise<Identity | undefined> {
+  const map = await readMap();
+  return Object.values(map.identities).find(
+    (i) => i.email.toLowerCase() === email.toLowerCase() && i.name.trim() === name.trim(),
+  );
+}
+
 export type NewIdentity = Omit<Identity, 'id' | 'createdAt'> & { id?: string };
 
 export async function addIdentity(input: NewIdentity): Promise<Identity> {
   const map = await readMap();
-  const id = input.id ?? genId();
-  if (map.identities[id]) throw Errors.usage(`identity "${id}" already exists`);
+  const id = input.id ?? identityId(input.name, input.email);
   const identity: Identity = { ...input, id, createdAt: new Date().toISOString() };
+  if (map.identities[id]) return map.identities[id]; // idempotent (deterministic id)
   map.identities[id] = identity;
   // a manual add of a previously hidden committer un-hides it for future imports
   if (map.hidden?.[identity.email.toLowerCase()]) delete map.hidden[identity.email.toLowerCase()];
@@ -59,24 +101,41 @@ export async function addIdentity(input: NewIdentity): Promise<Identity> {
   return identity;
 }
 
-/** Patch editable fields of an identity (name/email/key reference). */
+/** Patch editable fields of an identity (name/email/scope). */
 export async function updateIdentity(
   id: string,
-  patch: Partial<Pick<Identity, 'name' | 'email' | 'sshKeyPath' | 'sshKeyFingerprint' | 'sshKeyEncrypted' | 'disabled' | 'scope' | 'remoteKeys' | 'gpgKey'>>,
+  patch: Partial<Pick<Identity, 'name' | 'email' | 'scope' | 'host' | 'fromConfig'>>,
 ): Promise<Identity> {
   const map = await readMap();
   const identity = map.identities[id];
   if (!identity) throw Errors.usage(`identity "${id}" not found`);
-  const next = { ...identity, ...patch };
-  // clearing the key reference clears its companions
-  if (patch.sshKeyPath === undefined && Object.keys(patch).includes('sshKeyPath')) {
-    delete next.sshKeyPath;
-    delete next.sshKeyFingerprint;
-    delete next.sshKeyEncrypted;
-  }
-  map.identities[id] = next;
+  map.identities[id] = { ...identity, ...patch };
   await writeMap(map);
-  return next;
+  return map.identities[id];
+}
+
+// --- key bindings (preference records, machine scope by construction) ---
+
+export async function getKeyBinding(id: string): Promise<KeyBinding> {
+  const map = await readMap();
+  return map.keyBindings?.[id] ?? {};
+}
+
+export async function setKeyBinding(id: string, binding: KeyBinding): Promise<void> {
+  const map = await readMap();
+  if (!map.identities[id]) throw Errors.usage(`identity "${id}" not found`);
+  map.keyBindings = { ...map.keyBindings, [id]: binding };
+  await writeMap(map);
+}
+
+export async function setPushKey(id: string, ref: SshKeyRef | undefined): Promise<void> {
+  const b = await getKeyBinding(id);
+  await setKeyBinding(id, { ...b, pushKey: ref });
+}
+
+export async function setSignKey(id: string, ref: SignKeyRef | undefined): Promise<void> {
+  const b = await getKeyBinding(id);
+  await setKeyBinding(id, { ...b, signKey: ref });
 }
 
 /** Hide an email from future auto-imports (hide machine-level). */
@@ -106,6 +165,7 @@ export async function removeIdentity(id: string): Promise<void> {
   const map = await readMap();
   if (!map.identities[id]) throw Errors.usage(`identity "${id}" not found`);
   delete map.identities[id];
+  if (map.keyBindings?.[id]) delete map.keyBindings[id];
   if (map.defaultIdentity === id) delete map.defaultIdentity;
   await writeMap(map);
 }

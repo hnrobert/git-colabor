@@ -46,7 +46,6 @@ function topHelp(): string {
     '  git colabor identity disable <id>        (deactivate on key/passphrase failure)',
     '  git colabor identity rm <id>',
     '  git colabor identity logout [id]',
-    '  git colabor identity revert',
     '  git colabor identity status',
     '  git colabor identity audit [--repo <p>] [--tail N]',
     '  git colabor identity doctor',
@@ -257,10 +256,6 @@ function identityHuman(command: string | undefined, d: unknown): string {
   if (command === 'logout') {
     const data = d as { identity: { name: string }; cleared: { agent: boolean } };
     return `Logged out "${data.identity.name}" (agent: ${data.cleared.agent ? 'removed' : 'n/a'}; the key file itself is never touched)`;
-  }
-  if (command === 'revert') {
-    const data = d as { hadBackup: boolean };
-    return data.hadBackup ? 'Reverted repo identity to pre-tool state.' : 'Repo was not managed; nothing to revert.';
   }
   if (command === 'audit') {
     const entries = (d as { entries: Array<{ ts: string; action: string; identityName?: string; result: string }> }).entries ?? [];

@@ -6,35 +6,49 @@
 export type Source = 'ext' | 'cli';
 
 export type Identity = {
-  /** stable opaque id, e.g. "id_" + 8 hex (NOT the fingerprint) */
+  /** deterministic: "id_" + sha256(name + "\n" + email) — stable across key changes */
   id: string;
   name: string;
   email: string;
-  /** "SHA256:…" from `ssh-keygen -lf` */
-  sshKeyFingerprint?: string;
-  /** referenced key source path (absolute); never a copy */
-  sshKeyPath?: string;
   /** informational, e.g. "github.com" */
   host?: string;
   /** true when auto-imported from repo history (`identity import`) */
   imported?: boolean;
-  /** true when the referenced key is passphrase-protected (probed at import) */
-  sshKeyEncrypted?: boolean;
-  /** set when a passphrase failure disabled the identity — explicit `use` re-enables */
-  disabled?: boolean;
-  /** where this identity is remembered: user (vscode config), machine (identities.json), or project (repo scan) */
+  /** where this identity is remembered: machine (identities.json) or project (repo scan) */
   scope?: 'machine' | 'project';
-  /** per-remote key paths: { "origin": "/path/to/key", ... } — keyed by git remote name */
-  remoteKeys?: Record<string, string>;
-  /** OpenPGP key (fingerprint) this identity signs commits with; wins over the SSH key */
-  gpgKey?: string;
+  /** true when discovered from git config (auto-enrollment) rather than added by hand */
+  fromConfig?: boolean;
   /** ISO8601 */
   createdAt: string;
+};
+
+/** A referenced SSH key: path + derived facts (machine-local by construction). */
+export type SshKeyRef = {
+  /** absolute path to the private key file — never a copy */
+  path: string;
+  /** "SHA256:…" from `ssh-keygen -lf` */
+  fingerprint: string;
+  /** passphrase-protected (probed at bind time) */
+  encrypted?: boolean;
+};
+
+/** A signing key: SSH key reference or OpenPGP fingerprint. */
+export type SignKeyRef =
+  | ({ format: 'ssh' } & SshKeyRef)
+  | { format: 'openpgp'; /** primary fingerprint of the secret key */ key: string };
+
+/** Per-identity key PREFERENCES — recorded separately from the identity itself,
+ *  applied only at use/session time (best effort), never at set time. */
+export type KeyBinding = {
+  pushKey?: SshKeyRef;
+  signKey?: SignKeyRef;
 };
 
 export type IdentityMap = {
   schemaVersion: 1;
   identities: Record<string, Identity>;
+  /** key preferences, keyed by identity id — machine scope by construction */
+  keyBindings?: Record<string, KeyBinding>;
   defaultIdentity?: string;
   /** lowercased emails hidden from auto-import (hide machine-level) */
   hidden?: Record<string, true>;
@@ -74,7 +88,6 @@ export type RepoState = {
 export type AuditAction =
   | 'identity.use'
   | 'identity.logout'
-  | 'identity.revert'
   | 'identity.import'
   | 'identity.set'
   | 'identity.sign'
