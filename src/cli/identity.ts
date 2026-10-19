@@ -45,7 +45,10 @@ const ADD_SPEC = {
 };
 const AUDIT_SPEC = { valueFlags: ['--repo', '--since', '--tail'] };
 const APPLY_SPEC = { valueFlags: ['--name', '--email', '--ssh-command', '--source'] };
-const SET_SPEC = { valueFlags: ['--name', '--email', '--key', '--gpg-key', '--scope'], boolFlags: ['--no-key', '--no-gpg-key'] };
+const SET_SPEC = {
+  valueFlags: ['--name', '--email', '--key', '--gpg-key', '--sign-key', '--scope'],
+  boolFlags: ['--no-key', '--no-gpg-key', '--no-sign-key'],
+};
 const SIGN_SPEC = { valueFlags: [], boolFlags: ['--off'] };
 const AGENT_SPEC = { valueFlags: [], boolFlags: ['--remove', '--verify'] };
 
@@ -65,7 +68,16 @@ function identityToJson(i: Identity, defaultId?: string, agentPrints?: Set<strin
     keyEncrypted: !!push?.encrypted,
     /** key fingerprint currently held by ssh-agent (live check) */
     inAgent: !!push?.fingerprint && (agentPrints?.has(push.fingerprint) ?? false),
-    signKey: sign ? (sign.format === 'openpgp' ? { format: sign.format, key: sign.key } : { format: sign.format, path: sign.path, fingerprint: sign.fingerprint }) : null,
+    signKey: sign
+      ? sign.format === 'openpgp'
+        ? { format: sign.format, key: sign.key }
+        : {
+            format: sign.format,
+            path: sign.path,
+            fingerprint: sign.fingerprint,
+            ...(sign.encrypted ? { encrypted: true } : {}),
+          }
+      : null,
     imported: !!i.imported,
     fromConfig: !!i.fromConfig,
     scope: i.scope ?? (i.imported ? 'project' : 'machine'),
@@ -313,7 +325,9 @@ async function rm(p: CmdParsed): Promise<JsonResult> {
 async function setIdentity(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const id = p.positionals[0];
   if (!id) {
-    throw Errors.usage('git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key | --gpg-key <k> | --no-gpg-key | --scope <s>');
+    throw Errors.usage(
+      'git colabor identity set <id> --name <n> | --email <e> | --key <path> | --no-key | --gpg-key <k> | --no-gpg-key | --sign-key <path> | --no-sign-key | --scope <s>',
+    );
   }
   await getIdentity(id); // validates existence
   const warnings: Warning[] = [];
@@ -341,7 +355,7 @@ async function setIdentity(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
       warnings.push({ code: 'encrypted-key', message: 'key is encrypted; it loads via the extension askpass session or an ssh-agent' });
     }
   }
-  if (p.bools.has('--no-gpg-key')) {
+  if (p.bools.has('--no-gpg-key') || p.bools.has('--no-sign-key')) {
     await setSignKey(id, undefined);
     keyTouched = true;
   }
@@ -353,8 +367,20 @@ async function setIdentity(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
     await setSignKey(id, { format: 'openpgp', key: key.fingerprint });
     keyTouched = true;
   }
+  if (p.values['--sign-key']) {
+    const signSource = p.values['--sign-key'];
+    if (!existsSync(signSource)) throw Errors.usage(`key file not found: ${signSource}`);
+    const imp = await importKey(signSource);
+    await setSignKey(id, { format: 'ssh', path: imp.path, fingerprint: imp.fingerprint, ...(imp.encrypted ? { encrypted: true } : {}) });
+    keyTouched = true;
+    if (imp.encrypted) {
+      warnings.push({ code: 'encrypted-key', message: 'sign key is encrypted; it signs via the extension askpass session or an ssh-agent' });
+    }
+  }
   if (Object.keys(patch).length === 0 && !keyTouched) {
-    throw Errors.usage('identity set needs at least one of --name / --email / --key / --no-key / --gpg-key / --no-gpg-key / --scope');
+    throw Errors.usage(
+      'identity set needs at least one of --name / --email / --key / --no-key / --gpg-key / --no-gpg-key / --sign-key / --no-sign-key / --scope',
+    );
   }
   const next = Object.keys(patch).length > 0 ? await updateIdentity(id, patch) : await getIdentity(id);
   await appendAudit({
@@ -370,7 +396,7 @@ async function setIdentity(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
 
 async function logout(p: CmdParsed, ctx: IdCtx): Promise<JsonResult> {
   const r = await logoutIdentity({ source: 'cli', cwd: ctx.cwd, id: p.positionals[0] });
-  return ok({ identity: r.identity, cleared: { agent: r.agentRemoved } });
+  return ok({ identity: r.identity, cleared: r.cleared });
 }
 
 async function audit(p: CmdParsed): Promise<JsonResult> {

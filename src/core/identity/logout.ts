@@ -28,6 +28,8 @@ export async function logoutIdentity(opts: {
 }): Promise<{
   identity: { id: string; name: string; fingerprint?: string };
   agentRemoved: boolean;
+  /** what was removed from the repo's git config (agent is above) */
+  cleared: { agent: boolean; config: boolean; sshCommand: boolean; signing: boolean };
 }> {
   const resolved = await resolveActive(opts.cwd);
   let id = opts.id ?? resolved?.identity.id;
@@ -41,16 +43,25 @@ export async function logoutIdentity(opts: {
 
   const agentRemoved = binding.pushKey ? await removeKey(binding.pushKey.path) : false;
 
-  // config layer: when the logging-out identity is what config currently
-  // says, clear its standard keys (content-matched, no markers needed)
-  let clearedConfig = false;
-  if (resolved?.identity.id === id) {
-    const { clearIdentityConfigLayer } = await import('./configClear.js');
-    clearedConfig = await clearIdentityConfigLayer({ name: identity.name, email: identity.email }, opts.cwd);
-  }
-  // co-author selection + commit template ride along — logout leaves the
-  // repo with zero colabor-managed state
-  if (clearedConfig) {
+  // config layer: the identity's name/email clear on match, and any KEY
+  // configs referencing its keys go too — a previous `use` can leave them
+  // behind after the repo moved on to someone else. When the identity IS
+  // the config-derived active one its key configs drop unconditionally.
+  const { clearIdentityConfigLayer } = await import('./configClear.js');
+  const cleared = await clearIdentityConfigLayer(
+    {
+      name: identity.name,
+      email: identity.email,
+      pushKeyPath: binding.pushKey?.path,
+      signKey: binding.signKey,
+    },
+    { cwd: opts.cwd, forceKeys: resolved?.identity.id === id },
+  );
+  const clearedAnything = cleared.identityLayer || cleared.sshCommand || cleared.signing;
+  // co-author selection + commit template ride along when the identity's
+  // config layer went away — logout leaves the repo with zero
+  // colabor-managed state
+  if (cleared.identityLayer) {
     const { unsetAllConfig } = await import('../git/config.js');
     const { clearTemplate } = await import('../message/template.js');
     await unsetAllConfig('colabor.selected', 'local', opts.cwd);
@@ -64,11 +75,21 @@ export async function logoutIdentity(opts: {
     identityName: identity.name,
     fingerprint: binding.pushKey?.fingerprint,
     repo: await safeTopLevel(opts.cwd),
-    message: clearedConfig ? 'cleared config + agent' : 'agent only',
+    message: clearedAnything
+      ? `cleared ${[cleared.identityLayer ? 'config' : null, cleared.sshCommand ? 'ssh key' : null, cleared.signing ? 'sign key' : null]
+          .filter(Boolean)
+          .join(' + ')} + agent`
+      : 'agent only',
   });
 
   return {
     identity: { id: identity.id, name: identity.name, fingerprint: binding.pushKey?.fingerprint },
     agentRemoved,
+    cleared: {
+      agent: agentRemoved,
+      config: cleared.identityLayer,
+      sshCommand: cleared.sshCommand,
+      signing: cleared.signing,
+    },
   };
 }

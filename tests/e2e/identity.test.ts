@@ -287,6 +287,70 @@ describe('identity e2e (real git + real ssh-keygen)', () => {
     const r = await logoutIdentity({ source: 'cli', cwd: root, id: id.id });
     expect(r.agentRemoved).toBe(false); // no agent under test — removal is best-effort
     await stat(keyPath); // reference mode: the user's file survives logout
+    // Carol was the config-active identity → her whole layer is gone
+    expect(r.cleared.config).toBe(true);
+    expect(await getConfig('core.sshCommand', 'local', root)).toBeUndefined();
+
+    await rm(keyDir, { recursive: true, force: true });
+  });
+
+  it('a dedicated sign key (set --sign-key) wins over the auth key, and unbinding falls back', async () => {
+    const keyDir = await mkdtemp(join(tmpdir(), 'ca-key-dual-'));
+    const authPath = join(keyDir, 'id_auth');
+    const signPath = join(keyDir, 'id_signonly');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', authPath, '-C', 'auth'], { encoding: 'utf8' });
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', signPath, '-C', 'sign'], { encoding: 'utf8' });
+    const auth = await importKey(authPath);
+    const sign = await importKey(signPath);
+    const dual = await addIdentity({ name: 'Dual', email: 'dual@x.com' });
+    await setPushKey(dual.id, { path: auth.path, fingerprint: auth.fingerprint });
+
+    // no sign key bound → signing uses the AUTH key
+    await setCommitSigning({ source: 'cli', cwd: root, id: dual.id, on: true });
+    expect(await getConfig('user.signingKey', 'local', root)).toBe(authPath);
+
+    // binding a dedicated sign key moves signing to it (push key untouched)
+    await setSignKey(dual.id, { format: 'ssh', path: sign.path, fingerprint: sign.fingerprint });
+    await setCommitSigning({ source: 'cli', cwd: root, id: dual.id, on: true });
+    expect(await getConfig('user.signingKey', 'local', root)).toBe(signPath);
+    expect((await getKeyBinding(dual.id)).pushKey?.path).toBe(auth.path);
+
+    // unbinding falls back to the auth key
+    await setSignKey(dual.id, undefined);
+    await setCommitSigning({ source: 'cli', cwd: root, id: dual.id, on: true });
+    expect(await getConfig('user.signingKey', 'local', root)).toBe(authPath);
+
+    await setCommitSigning({ source: 'cli', cwd: root, id: dual.id, on: false });
+    await rm(keyDir, { recursive: true, force: true });
+  });
+
+  it('logout clears the identity’s leftover ssh/sign keys even after the repo moved on', async () => {
+    const keyDir = await mkdtemp(join(tmpdir(), 'ca-key3-'));
+    const keyPath = join(keyDir, 'id_left');
+    spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath, '-C', 'left'], { encoding: 'utf8' });
+    const imp = await importKey(keyPath);
+    const dave = await addIdentity({ name: 'Dave', email: 'dave@x.com' });
+    await setPushKey(dave.id, { path: imp.path, fingerprint: imp.fingerprint });
+    await applyIdentity(dave.id, { source: 'cli', cwd: root }); // writes sshCommand
+    await setCommitSigning({ source: 'cli', cwd: root, id: dave.id, on: true }); // writes signing keys
+
+    // the repo moves on with RAW git config — Dave's keys linger behind
+    git(root, ['config', '--local', 'user.name', 'Eve']);
+    git(root, ['config', '--local', 'user.email', 'eve@x.com']);
+    expect(await getConfig('core.sshCommand', 'local', root)).toBeDefined();
+    expect(await getConfig('user.signingKey', 'local', root)).toBe(keyPath);
+
+    const r = await logoutIdentity({ source: 'cli', cwd: root, id: dave.id });
+    // Dave's keys are gone from config…
+    expect(r.cleared.sshCommand).toBe(true);
+    expect(r.cleared.signing).toBe(true);
+    expect(await getConfig('core.sshCommand', 'local', root)).toBeUndefined();
+    expect(await getConfig('user.signingKey', 'local', root)).toBeUndefined();
+    expect(await getConfig('commit.gpgsign', 'local', root)).toBeUndefined();
+    expect(await getConfig('gpg.format', 'local', root)).toBeUndefined();
+    // …but Eve's committer config survives (name/email clear on match only)
+    expect(await getConfig('user.name', 'local', root)).toBe('Eve');
+    expect(await getConfig('user.email', 'local', root)).toBe('eve@x.com');
 
     await rm(keyDir, { recursive: true, force: true });
   });
